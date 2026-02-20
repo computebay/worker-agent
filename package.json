@@ -6,15 +6,15 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "bun run src/index.ts",
-    "start": "bun run src/index.ts",
-    "build": "bun build src/index.ts --outdir dist",
+    "dev": "npx nodemon src/main.ts",
+    "start": "node run src/main.ts",
+    "build": "node build src/main.ts --outdir dist",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
     "format": "prettier --write .",
-    "lint": "bunx eslint . --ext .ts"
+    "lint": "npx eslint . --ext .ts"
   },
   "dependencies": {
     "@prisma/client": "^6.9.0",
@@ -27,7 +27,7 @@
   },
   "devDependencies": {
     "@types/amqplib": "^0.10.8",
-    "@types/bun": "latest",
+    
     "@types/node": "^20.10.6",
     "@types/uuid": "^9.0.7",
     "pino-pretty": "^13.1.2",
