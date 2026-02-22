@@ -16,7 +16,7 @@ const configSchema = z.object({
 export type Config = z.infer<typeof configSchema>;
 
 export function loadConfig(): Config {
-  const parsed = configSchema.safeParse(dotenv.config());
+  const parsed = configSchema.safeParse(process.env);
 
   if (!parsed.success) {
     const msg = parsed.error.errors
