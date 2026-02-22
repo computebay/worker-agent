@@ -4,8 +4,8 @@ import { detectSystemSpecs } from "./monitoring/system.specs.js";
 import { computeAllocatable } from "./monitoring/capacity.js";
 import { ResourceMonitor } from "./monitoring/resource.monitor.js";
 import { createConnection, closeConnection } from "./messaging/rabbit.connection.js";
-import { consume, cancelConsumer, waitForApproval } from "./messaging/rabbit.consumer.js";
-import { publishSigned } from "./messaging/rabbit.publisher.js";
+import { consume, cancelConsumer } from "./messaging/rabbit.consumer.js";
+import { publish, publishHeartbeat } from "./messaging/rabbit.publisher.js";
 import { WorkerPool } from "./execution/worker.pool.js";
 import { gracefulShutdown, installSigTermHandler } from "./lifecycle/shutdown.js";
 import type { ScheduledJob } from "./types/job.types.js";
@@ -14,6 +14,8 @@ import { logger } from "./utils/logger.js";
 async function main(): Promise<void> {
   const config = loadConfig();
   const nodeId = getNodeId();
+  logger.info({ nodeId }, "Worker starting");
+
 
   const specs = detectSystemSpecs();
   const { allocatableCpu, allocatableMemoryMb } = computeAllocatable(
@@ -30,9 +32,11 @@ async function main(): Promise<void> {
     allocatableMemoryMb,
   });
 
+  logger.info({ url: config.RABBITMQ_URL }, "Connecting to RabbitMQ");
   const ctx = await createConnection(config.RABBITMQ_URL);
+  logger.info("RabbitMQ connected");
 
-  publishSigned(ctx.channel, "node.registration.requested", {
+  publish(ctx.channel, "node.registered", {
     nodeId,
     publicKey: getPublicKey(),
     totalCpu: specs.totalCpu,
@@ -41,13 +45,10 @@ async function main(): Promise<void> {
     allocatableMemoryMb,
     timestamp: new Date().toISOString(),
   });
-  logger.info({ nodeId, allocatableCpu, allocatableMemoryMb }, "Registration requested");
-
-  await waitForApproval(ctx.channel, nodeId);
-  logger.info({ nodeId }, "Node approved, starting heartbeat and job consumer");
+  logger.info({ nodeId, allocatableCpu, allocatableMemoryMb }, "Node registered, publishing to Scheduler");
 
   const publishJobEvent = (routingKey: string, payload: Record<string, unknown>): void => {
-    publishSigned(ctx.channel, routingKey, payload);
+    publish(ctx.channel, routingKey, payload);
   };
 
   const workerPool = new WorkerPool({
@@ -68,12 +69,14 @@ async function main(): Promise<void> {
     },
   });
 
+  logger.info({ nodeId, maxConcurrency }, "Starting job consumer");
   const consumerTag = await consume(
     ctx.channel,
     nodeId,
     maxConcurrency,
     async (payload: unknown) => {
       const job = payload as ScheduledJob;
+      logger.info({ jobId: job.jobId, image: job.image }, "Job received");
       if (
         !job.jobId ||
         !job.image ||
@@ -84,21 +87,24 @@ async function main(): Promise<void> {
       }
 
       if (!workerPool.canAccept(job)) {
+        logger.warn({ jobId: job.jobId }, "Rejecting job: insufficient resources or draining");
         throw new Error(
           `Cannot accept job ${job.jobId}: resources unavailable or draining`
         );
       }
 
       publishJobEvent("job.started", { jobId: job.jobId });
+      logger.info({ jobId: job.jobId }, "Job started, running container");
 
       await workerPool.run(job);
+      logger.info({ jobId: job.jobId }, "Job finished");
     }
   );
 
   const heartbeatInterval = setInterval(() => {
     const usage = resourceMonitor.getUsage();
     const { availableCpu, availableMemoryMb } = resourceMonitor.getAvailable();
-    publishSigned(ctx.channel, "node.heartbeat", {
+    publishHeartbeat(ctx.channel, {
       nodeId,
       totalCpu: specs.totalCpu,
       totalMemoryMb: specs.totalMemoryMb,
@@ -128,7 +134,7 @@ async function main(): Promise<void> {
         async () => {
           const usage = resourceMonitor.getUsage();
           const { availableCpu, availableMemoryMb } = resourceMonitor.getAvailable();
-          publishSigned(ctx.channel, "node.heartbeat", {
+          publishHeartbeat(ctx.channel, {
             nodeId,
             totalCpu: specs.totalCpu,
             totalMemoryMb: specs.totalMemoryMb,

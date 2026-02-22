@@ -21,6 +21,7 @@ export async function createConnection(url: string): Promise<RabbitContext> {
 
   const channel = await connection.createChannel();
   await channel.assertExchange(EXCHANGE, "topic", EXCHANGE_OPTIONS);
+  logger.info({ exchange: EXCHANGE }, "Exchange asserted");
 
   return { connection, channel };
 }

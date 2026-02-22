@@ -1,8 +1,7 @@
-import { createPrivateKey, generateKeyPairSync, sign } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { createPrivateKey, generateKeyPairSync, randomUUID, sign } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { logger } from "../utils/logger.js";
 
 const IDENTITY_DIR = join(homedir(), ".computebay");
@@ -20,25 +19,24 @@ function loadIdentity(): IdentityData {
   if (identity) return identity;
 
   if (!existsSync(IDENTITY_FILE)) {
+    const nodeId = randomUUID();
     const { publicKey, privateKey } = generateKeyPairSync("ed25519", {
       publicKeyEncoding: { type: "spki", format: "pem" },
       privateKeyEncoding: { type: "pkcs8", format: "pem" },
     });
-
-    const nodeId = randomUUID();
     identity = { nodeId, privateKey, publicKey };
-
     mkdirSync(IDENTITY_DIR, { recursive: true });
     try {
       writeFileSync(IDENTITY_FILE, JSON.stringify(identity, null, 0), {
         mode: 0o600,
         flag: "wx",
       });
-      logger.info({ nodeId }, "Generated new Ed25519 identity");
+      logger.info({ nodeId, identityFile: IDENTITY_FILE }, "Created new node identity");
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException)?.code === "EEXIST") {
         const raw = readFileSync(IDENTITY_FILE, "utf-8");
         identity = JSON.parse(raw) as IdentityData;
+        logger.info({ nodeId: identity.nodeId }, "Loaded existing identity (race)");
         return identity;
       }
       throw err;
@@ -48,7 +46,6 @@ function loadIdentity(): IdentityData {
 
   const raw = readFileSync(IDENTITY_FILE, "utf-8");
   identity = JSON.parse(raw) as IdentityData;
-
   if (
     typeof identity.nodeId !== "string" ||
     typeof identity.privateKey !== "string" ||
@@ -56,13 +53,12 @@ function loadIdentity(): IdentityData {
   ) {
     throw new Error("Invalid identity file format");
   }
-
-  logger.info({ nodeId: identity.nodeId }, "Loaded existing identity");
+  logger.info({ nodeId: identity.nodeId, identityFile: IDENTITY_FILE }, "Loaded existing node identity");
   return identity;
 }
 
 /**
- * Get the stable node ID (UUID) from the persisted identity.
+ * Get the stable node ID (UUID) from the persisted identity file.
  */
 export function getNodeId(): string {
   return loadIdentity().nodeId;

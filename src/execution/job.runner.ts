@@ -1,6 +1,7 @@
 import type { ScheduledJob } from "../types/job.types.js";
 import {
   createAndStart,
+  getContainerLogs,
   killContainer,
   removeContainer,
   waitContainer,
@@ -19,6 +20,7 @@ export interface JobRunResult {
  */
 export async function runJob(job: ScheduledJob, timeoutMs: number): Promise<JobRunResult> {
   const containerId = `computebay-${job.jobId}`;
+  logger.info({ jobId: job.jobId, containerId, image: job.image }, "Starting job");
 
   try {
     await createAndStart({
@@ -37,6 +39,7 @@ export async function runJob(job: ScheduledJob, timeoutMs: number): Promise<JobR
 
   const jobTimeoutMs = job.timeoutMs ?? timeoutMs;
   let timedOut = false;
+  logger.info({ jobId: job.jobId, timeoutMs: jobTimeoutMs }, "Waiting for container");
 
   const waitPromise = waitContainer(containerId);
   const timeoutPromise = new Promise<never>((_, reject) => {
@@ -56,15 +59,23 @@ export async function runJob(job: ScheduledJob, timeoutMs: number): Promise<JobR
     if (timedOut || (err instanceof Error && err.message === "TIMEOUT")) {
       timedOut = true;
       exitCode = 137;
+      logger.warn({ jobId: job.jobId, containerId }, "Job timed out, container killed");
     } else {
       logger.error({ err, jobId: job.jobId }, "Container wait/kill error");
       throw err;
     }
-  } finally {
-    await removeContainer(containerId).catch((err) => {
-      logger.warn({ err, containerId }, "Failed to remove container");
-    });
   }
+
+  try {
+    const output = await getContainerLogs(containerId);
+    logger.info({ jobId: job.jobId, exitCode, timedOut, output }, "Job output");
+  } catch (logErr) {
+    logger.warn({ jobId: job.jobId, err: logErr }, "Failed to fetch container logs");
+  }
+
+  await removeContainer(containerId).catch((err) => {
+    logger.warn({ err, containerId }, "Failed to remove container");
+  });
 
   return { exitCode, timedOut };
 }

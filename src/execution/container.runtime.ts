@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { logger } from "../utils/logger.js";
 
 export interface ContainerCreateOptions {
   containerId: string;
@@ -43,6 +44,8 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     image,
     ...command,
   ];
+  const cmd = `docker ${args.join(" ")}`;
+  logger.info({ containerId, image, cmd }, "Spawning Docker container");
 
   return new Promise((resolve, reject) => {
     const proc = spawn("docker", args, {
@@ -55,23 +58,37 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     });
 
     proc.on("close", (code, signal) => {
-      if (code === 0) resolve();
-      else reject(new Error(`docker run failed: exit ${code}, signal ${signal}, stderr: ${stderr}`));
+      if (code === 0) {
+        logger.info({ containerId }, "Docker container spawned successfully");
+        resolve();
+      } else {
+        logger.error({ containerId, code, signal, stderr }, "Docker run failed");
+        reject(new Error(`docker run failed: exit ${code}, signal ${signal}, stderr: ${stderr}`));
+      }
     });
 
-    proc.on("error", reject);
+    proc.on("error", (err) => {
+      logger.error({ containerId, err }, "Docker spawn error");
+      reject(err);
+    });
   });
 }
 
 export function killContainer(containerId: string): Promise<void> {
+  logger.info({ containerId }, "Docker kill (timeout)");
   return new Promise((resolve, reject) => {
     const proc = spawn("docker", ["kill", containerId], {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
     proc.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`docker kill failed: exit ${code}`));
+      if (code === 0) {
+        logger.info({ containerId }, "Docker kill succeeded");
+        resolve();
+      } else {
+        logger.error({ containerId, code }, "Docker kill failed");
+        reject(new Error(`docker kill failed: exit ${code}`));
+      }
     });
 
     proc.on("error", reject);
@@ -89,6 +106,31 @@ export function removeContainer(containerId: string): Promise<void> {
       else reject(new Error(`docker rm failed: exit ${code}`));
     });
 
+    proc.on("error", reject);
+  });
+}
+
+export function getContainerLogs(containerId: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("docker", ["logs", "--tail", "10000", containerId], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    proc.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    proc.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    proc.on("close", (code) => {
+      if (code === 0 || code === 1) {
+        const out = stdout + (stderr ? `\n[stderr]\n${stderr}` : "");
+        resolve(out.trim() || "(no output)");
+      } else {
+        reject(new Error(`docker logs failed: exit ${code}`));
+      }
+    });
     proc.on("error", reject);
   });
 }

@@ -60,6 +60,7 @@ export class WorkerPool {
 
     try {
       const result = await runJob(job, this.jobTimeoutMs);
+      logger.info({ jobId: job.jobId, exitCode: result.exitCode, timedOut: result.timedOut }, "Job completed");
       this.onJobResult({
         jobId: job.jobId,
         exitCode: result.exitCode,

@@ -3,40 +3,8 @@ import { EXCHANGE } from "./rabbit.types.js";
 import { logger } from "../utils/logger.js";
 
 const QUEUE_OPTIONS = { durable: true };
-const APPROVAL_QUEUE_OPTIONS = { durable: false, autoDelete: true };
 
 export type MessageHandler = (payload: unknown) => Promise<void>;
-
-/**
- * Wait for node.approved.{nodeId} message. Resolves when approval received.
- * Uses exclusive auto-delete queue bound to node.approved.{nodeId}.
- */
-export function waitForApproval(channel: Channel, nodeId: string): Promise<void> {
-  const queue = `worker.${nodeId}.approval`;
-  const routingKey = `node.approved.${nodeId}`;
-
-  return new Promise((resolve, reject) => {
-    channel
-      .assertQueue(queue, APPROVAL_QUEUE_OPTIONS)
-      .then(() => channel.bindQueue(queue, EXCHANGE, routingKey))
-      .then(() =>
-        channel.consume(
-          queue,
-          (msg) => {
-            if (msg) {
-              channel.ack(msg);
-              resolve();
-            }
-          },
-          { noAck: false }
-        )
-      )
-      .then(() => {
-        logger.info({ queue, routingKey }, "Waiting for node approval");
-      })
-      .catch(reject);
-  });
-}
 
 /**
  * Consume from worker queue with manual ACK.
@@ -65,6 +33,7 @@ export async function consume(
 
       try {
         const payload = JSON.parse(msg.content.toString("utf-8"));
+        logger.debug({ payload }, "Message received");
         await handler(payload);
         channel.ack(msg);
       } catch (err) {
