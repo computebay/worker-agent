@@ -7,6 +7,7 @@ export type JobResultCallback = (result: {
   jobId: string;
   exitCode: number;
   timedOut: boolean;
+  output: string;
   error?: Error;
 }) => void;
 
@@ -65,6 +66,7 @@ export class WorkerPool {
         jobId: job.jobId,
         exitCode: result.exitCode,
         timedOut: result.timedOut,
+        output: result.output,
       });
     } catch (err) {
       logger.error({ err, jobId: job.jobId }, "Job execution failed");
@@ -72,6 +74,7 @@ export class WorkerPool {
         jobId: job.jobId,
         exitCode: -1,
         timedOut: false,
+        output: "",
         error: err instanceof Error ? err : new Error(String(err)),
       });
     } finally {

@@ -11,6 +11,7 @@ import { logger } from "../utils/logger.js";
 export interface JobRunResult {
   exitCode: number;
   timedOut: boolean;
+  output: string;
 }
 
 /**
@@ -18,18 +19,46 @@ export interface JobRunResult {
  * Enforces timeout via docker kill.
  * Always removes container after completion or failure.
  */
+/** Node -e snippet that runs code from CODE_B64 env (avoids shell escaping). */
+const NODE_EVAL_CODE =
+  "eval(require('buffer').Buffer.from(process.env.CODE_B64,'base64').toString('utf8'))";
+
+function buildContainerOptions(job: ScheduledJob): {
+  image: string;
+  command: string[];
+  env: Record<string, string>;
+} {
+  if (job.inlineCode) {
+    const codeB64 = Buffer.from(job.inlineCode, "utf8").toString("base64");
+    return {
+      image: job.image,
+      command: ["node", "-e", NODE_EVAL_CODE],
+      env: { ...job.env, CODE_B64: codeB64 },
+    };
+  }
+  return {
+    image: job.image,
+    command: job.command,
+    env: job.env ?? {},
+  };
+}
+
 export async function runJob(job: ScheduledJob, timeoutMs: number): Promise<JobRunResult> {
   const containerId = `computebay-${job.jobId}`;
-  logger.info({ jobId: job.jobId, containerId, image: job.image }, "Starting job");
+  const opts = buildContainerOptions(job);
+  logger.info(
+    { jobId: job.jobId, containerId, image: opts.image, hasInlineCode: Boolean(job.inlineCode) },
+    "Starting job"
+  );
 
   try {
     await createAndStart({
       containerId,
-      image: job.image,
+      image: opts.image,
       cpu: job.cpu,
       memoryMb: job.memoryMB,
-      command: job.command,
-      env: job.env,
+      command: opts.command,
+      env: opts.env,
     });
   } catch (err) {
     logger.error({ err, jobId: job.jobId }, "Failed to create container");
@@ -66,8 +95,9 @@ export async function runJob(job: ScheduledJob, timeoutMs: number): Promise<JobR
     }
   }
 
+  let output = "";
   try {
-    const output = await getContainerLogs(containerId);
+    output = await getContainerLogs(containerId);
     logger.info({ jobId: job.jobId, exitCode, timedOut, output }, "Job output");
   } catch (logErr) {
     logger.warn({ jobId: job.jobId, err: logErr }, "Failed to fetch container logs");
@@ -77,5 +107,5 @@ export async function runJob(job: ScheduledJob, timeoutMs: number): Promise<JobR
     logger.warn({ err, containerId }, "Failed to remove container");
   });
 
-  return { exitCode, timedOut };
+  return { exitCode, timedOut, output };
 }

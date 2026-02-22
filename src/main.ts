@@ -8,8 +8,8 @@ import { consume, cancelConsumer } from "./messaging/rabbit.consumer.js";
 import { publish, publishHeartbeat } from "./messaging/rabbit.publisher.js";
 import { WorkerPool } from "./execution/worker.pool.js";
 import { gracefulShutdown, installSigTermHandler } from "./lifecycle/shutdown.js";
-import type { ScheduledJob } from "./types/job.types.js";
-import { InvalidJobPayloadError } from "./types/job.types.js";
+import type { ScheduledJobMessage } from "./types/job.types.js";
+import { InvalidJobPayloadError, toScheduledJob } from "./types/job.types.js";
 import { logger } from "./utils/logger.js";
 
 async function main(): Promise<void> {
@@ -57,15 +57,15 @@ async function main(): Promise<void> {
     resourceMonitor,
     maxConcurrency,
     jobTimeoutMs: config.JOB_TIMEOUT_MS,
-    onJobResult: ({ jobId, exitCode, timedOut, error }) => {
+    onJobResult: ({ jobId, exitCode, timedOut, output, error }) => {
       if (timedOut) {
         publishJobEvent("job.timeout", { jobId });
       } else if (error) {
-        publishJobEvent("job.failed", { jobId, error: error.message });
+        publishJobEvent("job.failed", { jobId, error: error.message, output: output ?? "" });
       } else if (exitCode === 0) {
-        publishJobEvent("job.completed", { jobId, exitCode });
+        publishJobEvent("job.completed", { jobId, exitCode, output: output ?? "" });
       } else {
-        publishJobEvent("job.failed", { jobId, error: `Exit code ${exitCode}` });
+        publishJobEvent("job.failed", { jobId, error: `Exit code ${exitCode}`, output: output ?? "" });
       }
     },
   });
@@ -76,23 +76,27 @@ async function main(): Promise<void> {
     nodeId,
     maxConcurrency,
     async (payload: unknown) => {
-      const job = payload as ScheduledJob;
-      logger.info({ jobId: job.jobId, image: job.image }, "Job received");
+      const msg = payload as ScheduledJobMessage;
+      logger.info({ jobId: msg.jobId, runtime: msg.runtime }, "Job received");
       if (
-        !job.jobId ||
-        !job.image ||
-        typeof job.cpu !== "number" ||
-        typeof job.memoryMB !== "number"
+        !msg.jobId ||
+        !msg.jobType ||
+        !msg.runtime ||
+        !Array.isArray(msg.entrypoint) ||
+        !msg.resources ||
+        typeof msg.resources !== "object" ||
+        !msg.inputArtifacts ||
+        typeof msg.inputArtifacts !== "object" ||
+        !msg.orgId
       ) {
         logger.warn(
-          { payload, missing: "image, cpu, and/or memoryMB" },
-          "Invalid job payload: Scheduler must send jobId, image, cpu, memoryMB. Discarding (no requeue)."
+          { payload },
+          "Invalid job payload: must match CreateJobInput (jobId, jobType, runtime, entrypoint, resources, inputArtifacts, orgId). Discarding (no requeue)."
         );
-        throw new InvalidJobPayloadError(
-          "Payload missing image, cpu, or memoryMB",
-          payload
-        );
+        throw new InvalidJobPayloadError("Payload missing required CreateJobInput fields", payload);
       }
+
+      const job = toScheduledJob(msg);
 
       if (!workerPool.canAccept(job)) {
         logger.warn({ jobId: job.jobId }, "Rejecting job: insufficient resources or draining");
