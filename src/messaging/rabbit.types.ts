@@ -1,8 +1,8 @@
-import type { Channel, Connection } from "amqplib";
+import type { Channel, ChannelModel } from "amqplib";
 
 export const EXCHANGE = "compute-bay.jobs";
 
 export interface RabbitContext {
-  connection: Connection;
+  connection: ChannelModel;
   channel: Channel;
 }

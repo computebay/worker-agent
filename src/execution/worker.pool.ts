@@ -25,7 +25,7 @@ export interface WorkerPoolOptions {
  * Concurrency and drain logic.
  */
 export class WorkerPool {
-  private readonly nodeId: string;
+  private readonly _nodeId: string;
   private readonly resourceMonitor: ResourceMonitor;
   private readonly maxConcurrency: number;
   private readonly jobTimeoutMs: number;
@@ -34,7 +34,7 @@ export class WorkerPool {
   private draining = false;
 
   constructor(options: WorkerPoolOptions) {
-    this.nodeId = options.nodeId;
+    this._nodeId = options.nodeId;
     this.resourceMonitor = options.resourceMonitor;
     this.maxConcurrency = options.maxConcurrency;
     this.jobTimeoutMs = options.jobTimeoutMs;

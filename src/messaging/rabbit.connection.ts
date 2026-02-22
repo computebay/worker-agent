@@ -9,9 +9,9 @@ const EXCHANGE_OPTIONS = { durable: true };
  * Handles reconnect logic on connection loss.
  */
 export async function createConnection(url: string): Promise<RabbitContext> {
-  const connection = await amqp.connect(url);
+  const connection: amqp.ChannelModel = await amqp.connect(url);
 
-  connection.on("error", (err) => {
+  connection.on("error", (err: Error) => {
     logger.error({ err }, "RabbitMQ connection error");
   });
 
