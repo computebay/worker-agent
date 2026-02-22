@@ -5,7 +5,6 @@ dotenv.config();
 
 const configSchema = z.object({
   RABBITMQ_URL: z.string().min(1).default("amqp://localhost:5672"),
-  NODE_ID: z.string().min(1),
   CPU_LIMIT: z.coerce.number().positive().optional(),
   MEMORY_LIMIT_MB: z.coerce.number().positive().optional(),
   HEARTBEAT_INTERVAL_MS: z.coerce.number().positive().default(10000),

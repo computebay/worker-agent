@@ -1,18 +1,19 @@
 import { loadConfig } from "./config/config.js";
+import { getNodeId, getPublicKey } from "./security/identity.js";
 import { detectSystemSpecs } from "./monitoring/system.specs.js";
 import { computeAllocatable } from "./monitoring/capacity.js";
 import { ResourceMonitor } from "./monitoring/resource.monitor.js";
 import { createConnection, closeConnection } from "./messaging/rabbit.connection.js";
-import { consume, cancelConsumer } from "./messaging/rabbit.consumer.js";
-import { publish } from "./messaging/rabbit.publisher.js";
+import { consume, cancelConsumer, waitForApproval } from "./messaging/rabbit.consumer.js";
+import { publishSigned } from "./messaging/rabbit.publisher.js";
 import { WorkerPool } from "./execution/worker.pool.js";
 import { gracefulShutdown, installSigTermHandler } from "./lifecycle/shutdown.js";
-import type { ScheduledJob, NodeHeartbeatEvent } from "./types/job.types.js";
+import type { ScheduledJob } from "./types/job.types.js";
 import { logger } from "./utils/logger.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const nodeId = config.NODE_ID;
+  const nodeId = getNodeId();
 
   const specs = detectSystemSpecs();
   const { allocatableCpu, allocatableMemoryMb } = computeAllocatable(
@@ -31,21 +32,22 @@ async function main(): Promise<void> {
 
   const ctx = await createConnection(config.RABBITMQ_URL);
 
-  publish(ctx.channel, "node.registered", {
+  publishSigned(ctx.channel, "node.registration.requested", {
     nodeId,
+    publicKey: getPublicKey(),
     totalCpu: specs.totalCpu,
     totalMemoryMb: specs.totalMemoryMb,
     allocatableCpu,
     allocatableMemoryMb,
     timestamp: new Date().toISOString(),
   });
-  logger.info({ nodeId, allocatableCpu, allocatableMemoryMb }, "Node registered");
+  logger.info({ nodeId, allocatableCpu, allocatableMemoryMb }, "Registration requested");
 
-  const publishJobEvent = (
-    routingKey: string,
-    payload: Record<string, unknown>
-  ): void => {
-    publish(ctx.channel, routingKey, { ...payload, nodeId, timestamp: new Date().toISOString() });
+  await waitForApproval(ctx.channel, nodeId);
+  logger.info({ nodeId }, "Node approved, starting heartbeat and job consumer");
+
+  const publishJobEvent = (routingKey: string, payload: Record<string, unknown>): void => {
+    publishSigned(ctx.channel, routingKey, payload);
   };
 
   const workerPool = new WorkerPool({
@@ -72,7 +74,12 @@ async function main(): Promise<void> {
     maxConcurrency,
     async (payload: unknown) => {
       const job = payload as ScheduledJob;
-      if (!job.jobId || !job.image || typeof job.cpu !== "number" || typeof job.memoryMB !== "number") {
+      if (
+        !job.jobId ||
+        !job.image ||
+        typeof job.cpu !== "number" ||
+        typeof job.memoryMB !== "number"
+      ) {
         throw new Error(`Invalid job payload: ${JSON.stringify(payload)}`);
       }
 
@@ -91,7 +98,7 @@ async function main(): Promise<void> {
   const heartbeatInterval = setInterval(() => {
     const usage = resourceMonitor.getUsage();
     const { availableCpu, availableMemoryMb } = resourceMonitor.getAvailable();
-    const event: NodeHeartbeatEvent = {
+    publishSigned(ctx.channel, "node.heartbeat", {
       nodeId,
       totalCpu: specs.totalCpu,
       totalMemoryMb: specs.totalMemoryMb,
@@ -101,8 +108,7 @@ async function main(): Promise<void> {
       availableMemoryMb,
       timestamp: new Date().toISOString(),
       draining: workerPool.isDraining(),
-    };
-    publish(ctx.channel, "node.heartbeat", event);
+    });
   }, config.HEARTBEAT_INTERVAL_MS);
 
   let shutdownStarted = false;
@@ -122,7 +128,7 @@ async function main(): Promise<void> {
         async () => {
           const usage = resourceMonitor.getUsage();
           const { availableCpu, availableMemoryMb } = resourceMonitor.getAvailable();
-          publish(ctx.channel, "node.heartbeat", {
+          publishSigned(ctx.channel, "node.heartbeat", {
             nodeId,
             totalCpu: specs.totalCpu,
             totalMemoryMb: specs.totalMemoryMb,
