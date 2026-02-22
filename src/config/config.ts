@@ -1,4 +1,7 @@
 import { z } from "zod";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const configSchema = z.object({
   RABBITMQ_URL: z.string().min(1).default("amqp://localhost:5672"),
@@ -13,7 +16,7 @@ const configSchema = z.object({
 export type Config = z.infer<typeof configSchema>;
 
 export function loadConfig(): Config {
-  const parsed = configSchema.safeParse(process.env);
+  const parsed = configSchema.safeParse(dotenv.config());
 
   if (!parsed.success) {
     const msg = parsed.error.errors
