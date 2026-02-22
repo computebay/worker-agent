@@ -1,5 +1,17 @@
 /**
+ * Thrown when the message payload is invalid (e.g. missing image/cpu/memoryMB).
+ * Consumer should nack without requeue to avoid an infinite loop.
+ */
+export class InvalidJobPayloadError extends Error {
+  constructor(message: string, public readonly payload: unknown) {
+    super(message);
+    this.name = "InvalidJobPayloadError";
+  }
+}
+
+/**
  * Job payload received from Scheduler via job.scheduled.{nodeId}
+ * Scheduler must send: jobId, image, cpu, memoryMB.
  */
 export interface ScheduledJob {
   jobId: string;

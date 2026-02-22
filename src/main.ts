@@ -9,6 +9,7 @@ import { publish, publishHeartbeat } from "./messaging/rabbit.publisher.js";
 import { WorkerPool } from "./execution/worker.pool.js";
 import { gracefulShutdown, installSigTermHandler } from "./lifecycle/shutdown.js";
 import type { ScheduledJob } from "./types/job.types.js";
+import { InvalidJobPayloadError } from "./types/job.types.js";
 import { logger } from "./utils/logger.js";
 
 async function main(): Promise<void> {
@@ -83,7 +84,14 @@ async function main(): Promise<void> {
         typeof job.cpu !== "number" ||
         typeof job.memoryMB !== "number"
       ) {
-        throw new Error(`Invalid job payload: ${JSON.stringify(payload)}`);
+        logger.warn(
+          { payload, missing: "image, cpu, and/or memoryMB" },
+          "Invalid job payload: Scheduler must send jobId, image, cpu, memoryMB. Discarding (no requeue)."
+        );
+        throw new InvalidJobPayloadError(
+          "Payload missing image, cpu, or memoryMB",
+          payload
+        );
       }
 
       if (!workerPool.canAccept(job)) {

@@ -37,8 +37,13 @@ export async function consume(
         await handler(payload);
         channel.ack(msg);
       } catch (err) {
-        logger.error({ err, queue }, "Job handler threw, nack with requeue");
-        channel.nack(msg, false, true);
+        const isInvalidPayload = err instanceof Error && err.name === "InvalidJobPayloadError";
+        if (isInvalidPayload) {
+          channel.nack(msg, false, false);
+        } else {
+          logger.error({ err, queue }, "Job handler threw, nack with requeue");
+          channel.nack(msg, false, true);
+        }
       }
     },
     { noAck: false }
