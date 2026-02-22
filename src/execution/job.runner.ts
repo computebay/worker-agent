@@ -58,7 +58,6 @@ export async function runJob(job: ScheduledJob, timeoutMs: number): Promise<JobR
       exitCode = 137;
     } else {
       logger.error({ err, jobId: job.jobId }, "Container wait/kill error");
-      await removeContainer(containerId).catch(() => {});
       throw err;
     }
   } finally {

@@ -24,7 +24,7 @@ export async function consume(
 
   await channel.assertQueue(queue, QUEUE_OPTIONS);
   await channel.bindQueue(queue, EXCHANGE, routingKey);
-  channel.prefetch(prefetch);
+  await channel.prefetch(prefetch);
 
   const { consumerTag } = await channel.consume(
     queue,

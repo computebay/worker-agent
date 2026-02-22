@@ -50,7 +50,7 @@ export class WorkerPool {
   async run(job: ScheduledJob): Promise<void> {
     if (!this.canAccept(job)) {
       throw new Error(
-        `Cannot accept job ${job.jobId}: draining=${this.draining} ` +
+        `[${this._nodeId}] Cannot accept job ${job.jobId}: draining=${this.draining} ` +
           `active=${this.activeCount}/${this.maxConcurrency} or insufficient resources`
       );
     }
