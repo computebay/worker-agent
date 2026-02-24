@@ -42,7 +42,7 @@ async function postJson<TResponse>(
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: { "content-type": "application/json", Authorization: `Bearer ${authToken}` },
+      headers: { "content-type": "application/json", "Authorization": `Bearer ${authToken}` },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
