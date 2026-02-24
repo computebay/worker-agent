@@ -1,13 +1,13 @@
 import { logger } from "../utils/logger.js";
 
-export interface NodeRegisterRequest {
+export type NodeRegisterRequest = {
   machineId: string;
   cpuCores: number;
   memoryMB: number;
   agentVersion: string;
 }
 
-export interface NodeRegisterResponse {
+export type NodeRegisterResponse = {
   nodeId: string;
   rabbitmq: {
     url: string;
@@ -16,7 +16,7 @@ export interface NodeRegisterResponse {
   };
 }
 
-export interface NodeHeartbeatRequest {
+export type NodeHeartbeatRequest = {
   nodeId: string;
   availableCpu: number;
   availableMemoryMB: number;
