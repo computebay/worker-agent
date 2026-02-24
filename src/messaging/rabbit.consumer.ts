@@ -1,14 +1,13 @@
 import type { Channel } from "amqplib";
 import { logger } from "../utils/logger.js";
 
-const QUEUE_OPTIONS = { durable: true };
-
 export type MessageHandler = (payload: unknown) => Promise<void>;
 
 /**
  * Consume from a specific queue with manual ACK.
  * Prefetch = maxConcurrency
  * Returns consumerTag for cancellation.
+ * Assumes the scheduler has already declared the queue.
  */
 export async function consume(
   channel: Channel,
@@ -16,7 +15,6 @@ export async function consume(
   prefetch: number,
   handler: MessageHandler
 ): Promise<string> {
-  await channel.assertQueue(queue, QUEUE_OPTIONS);
   await channel.prefetch(prefetch);
 
   const { consumerTag } = await channel.consume(

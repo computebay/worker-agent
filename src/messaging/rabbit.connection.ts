@@ -2,11 +2,9 @@ import amqp from "amqplib";
 import type { RabbitContext } from "./rabbit.types.js";
 import { logger } from "../utils/logger.js";
 
-const EXCHANGE_OPTIONS = { durable: true };
-
 /**
- * Establish RabbitMQ connection and ensure exchange exists.
- * Handles reconnect logic on connection loss.
+ * Establish RabbitMQ connection using provided credentials.
+ * The scheduler is responsible for declaring exchanges/queues.
  */
 export async function createConnection(url: string, publishExchange: string): Promise<RabbitContext> {
   const connection: amqp.ChannelModel = await amqp.connect(url);
@@ -20,8 +18,6 @@ export async function createConnection(url: string, publishExchange: string): Pr
   });
 
   const channel = await connection.createChannel();
-  await channel.assertExchange(publishExchange, "topic", EXCHANGE_OPTIONS);
-  logger.info({ exchange: publishExchange }, "Exchange asserted");
 
   return { connection, channel, publishExchange };
 }
