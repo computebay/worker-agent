@@ -35,10 +35,14 @@ async function postJson<TResponse>(
 ): Promise<TResponse> {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
+  const authToken = process.env.AUTH_TOKEN;
+  if (!authToken) {
+    throw new Error("AUTH_TOKEN environment variable is not set");
+  }
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", Authorization: `Bearer ${authToken}` },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
