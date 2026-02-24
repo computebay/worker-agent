@@ -12,7 +12,7 @@ import type { ScheduledJobMessage } from "./types/job.types.js";
 import { InvalidJobPayloadError, toScheduledJob } from "./types/job.types.js";
 import { logger } from "./utils/logger.js";
 import { registerNodeWithRetry, sendHeartbeat } from "./bootstrap/scheduler.client.js";
-import { saveBootstrapState } from "./bootstrap/bootstrap.state.js";
+import { loadBootstrapState, saveBootstrapState } from "./bootstrap/bootstrap.state.js";
 import { getAgentVersion } from "./utils/version.js";
 
 async function main(): Promise<void> {
@@ -36,35 +36,54 @@ async function main(): Promise<void> {
   });
 
   const agentVersion = config.AGENT_VERSION ?? getAgentVersion();
-  logger.info({ schedulerBaseUrl: config.SCHEDULER_BASE_URL }, "Registering node via Scheduler");
-  const reg = await registerNodeWithRetry(config.SCHEDULER_BASE_URL, {
-    machineId,
-    cpuCores: specs.totalCpu,
-    memoryMB: specs.totalMemoryMb,
-    agentVersion,
-  });
 
-  const nodeId = reg.nodeId;
-  const rabbitmqUrl = reg.rabbitmq.url;
-  const queueTemplate = reg.rabbitmq.queue;
-  const publishExchange = reg.rabbitmq.publishExchange;
-  const queue = queueTemplate
-    .split("<nodeId>")
-    .join(nodeId)
-    .split("{nodeId}")
-    .join(nodeId)
-    .split("${nodeId}")
-    .join(nodeId);
+  const existingBootstrap = loadBootstrapState();
 
-  saveBootstrapState({
-    nodeId,
-    rabbitmqUrl,
-    queue,
-    publishExchange,
-    registeredAt: new Date().toISOString(),
-  });
+  let nodeId: string;
+  let rabbitmqUrl: string;
+  let queue: string;
+  let publishExchange: string;
 
-  logger.info({ nodeId, rabbitmqUrl, queue, publishExchange }, "Registration complete; connecting to RabbitMQ");
+  if (existingBootstrap) {
+    nodeId = existingBootstrap.nodeId;
+    rabbitmqUrl = existingBootstrap.rabbitmqUrl;
+    queue = existingBootstrap.queue;
+    publishExchange = existingBootstrap.publishExchange;
+    logger.info(
+      { nodeId, rabbitmqUrl, queue, publishExchange },
+      "Loaded existing bootstrap state; skipping registration"
+    );
+  } else {
+    logger.info({ schedulerBaseUrl: config.SCHEDULER_BASE_URL }, "Registering node via Scheduler");
+    const reg = await registerNodeWithRetry(config.SCHEDULER_BASE_URL, {
+      machineId,
+      cpuCores: specs.totalCpu,
+      memoryMB: specs.totalMemoryMb,
+      agentVersion,
+    });
+
+    nodeId = reg.nodeId;
+    rabbitmqUrl = reg.rabbitmq.url;
+    const queueTemplate = reg.rabbitmq.queue;
+    publishExchange = reg.rabbitmq.publishExchange;
+    queue = queueTemplate
+      .split("<nodeId>")
+      .join(nodeId)
+      .split("{nodeId}")
+      .join(nodeId)
+      .split("${nodeId}")
+      .join(nodeId);
+
+    saveBootstrapState({
+      nodeId,
+      rabbitmqUrl,
+      queue,
+      publishExchange,
+      registeredAt: new Date().toISOString(),
+    });
+  }
+
+  logger.info({ nodeId, rabbitmqUrl, queue, publishExchange }, "Connecting to RabbitMQ");
   const ctx = await createConnection(rabbitmqUrl, publishExchange);
   logger.info("RabbitMQ connected");
 
