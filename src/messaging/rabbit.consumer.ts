@@ -1,5 +1,4 @@
 import type { Channel } from "amqplib";
-import { EXCHANGE } from "./rabbit.types.js";
 import { logger } from "../utils/logger.js";
 
 const QUEUE_OPTIONS = { durable: true };
@@ -7,23 +6,17 @@ const QUEUE_OPTIONS = { durable: true };
 export type MessageHandler = (payload: unknown) => Promise<void>;
 
 /**
- * Consume from worker queue with manual ACK.
- * Queue: worker.{nodeId}
- * Routing key: job.scheduled.{nodeId}
+ * Consume from a specific queue with manual ACK.
  * Prefetch = maxConcurrency
  * Returns consumerTag for cancellation.
  */
 export async function consume(
   channel: Channel,
-  nodeId: string,
+  queue: string,
   prefetch: number,
   handler: MessageHandler
 ): Promise<string> {
-  const queue = `worker.${nodeId}`;
-  const routingKey = `job.scheduled.${nodeId}`;
-
   await channel.assertQueue(queue, QUEUE_OPTIONS);
-  await channel.bindQueue(queue, EXCHANGE, routingKey);
   await channel.prefetch(prefetch);
 
   const { consumerTag } = await channel.consume(
@@ -49,7 +42,7 @@ export async function consume(
     { noAck: false }
   );
 
-  logger.info({ queue, routingKey, prefetch }, "Consumer started");
+  logger.info({ queue, prefetch }, "Consumer started");
   return consumerTag;
 }
 

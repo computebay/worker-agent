@@ -58,9 +58,16 @@ function loadIdentity(): IdentityData {
 }
 
 /**
- * Get the stable node ID (UUID) from the persisted identity file.
+ * Get the stable machine fingerprint (UUID) from the persisted identity file.
+ *
+ * Note: Historically this was called nodeId; in the hybrid architecture the Scheduler
+ * assigns a per-session/per-registration nodeId, while this value remains stable per machine.
  */
 export function getNodeId(): string {
+  return loadIdentity().nodeId;
+}
+
+export function getMachineId(): string {
   return loadIdentity().nodeId;
 }
 

@@ -1,22 +1,24 @@
 import { loadConfig } from "./config/config.js";
-import { getNodeId, getPublicKey } from "./security/identity.js";
+import { getMachineId } from "./security/identity.js";
 import { detectSystemSpecs } from "./monitoring/system.specs.js";
 import { computeAllocatable } from "./monitoring/capacity.js";
 import { ResourceMonitor } from "./monitoring/resource.monitor.js";
 import { createConnection, closeConnection } from "./messaging/rabbit.connection.js";
 import { consume, cancelConsumer } from "./messaging/rabbit.consumer.js";
-import { publish, publishHeartbeat } from "./messaging/rabbit.publisher.js";
+import { publish } from "./messaging/rabbit.publisher.js";
 import { WorkerPool } from "./execution/worker.pool.js";
 import { gracefulShutdown, installSigTermHandler } from "./lifecycle/shutdown.js";
 import type { ScheduledJobMessage } from "./types/job.types.js";
 import { InvalidJobPayloadError, toScheduledJob } from "./types/job.types.js";
 import { logger } from "./utils/logger.js";
+import { registerNodeWithRetry, sendHeartbeat } from "./bootstrap/scheduler.client.js";
+import { saveBootstrapState } from "./bootstrap/bootstrap.state.js";
+import { getAgentVersion } from "./utils/version.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const nodeId = getNodeId();
-  logger.info({ nodeId }, "Worker starting");
-
+  const machineId = getMachineId();
+  logger.info({ machineId }, "Worker starting");
 
   const specs = detectSystemSpecs();
   const { allocatableCpu, allocatableMemoryMb } = computeAllocatable(
@@ -33,23 +35,47 @@ async function main(): Promise<void> {
     allocatableMemoryMb,
   });
 
-  logger.info({ url: config.RABBITMQ_URL }, "Connecting to RabbitMQ");
-  const ctx = await createConnection(config.RABBITMQ_URL);
+  const agentVersion = config.AGENT_VERSION ?? getAgentVersion();
+  logger.info({ schedulerBaseUrl: config.SCHEDULER_BASE_URL }, "Registering node via Scheduler");
+  const reg = await registerNodeWithRetry(config.SCHEDULER_BASE_URL, {
+    machineId,
+    cpuCores: specs.totalCpu,
+    memoryMB: specs.totalMemoryMb,
+    agentVersion,
+  });
+
+  const nodeId = reg.nodeId;
+  const rabbitmqUrl = reg.rabbitmq.url;
+  const queueTemplate = reg.rabbitmq.queue;
+  const publishExchange = reg.rabbitmq.publishExchange;
+  const queue = queueTemplate
+    .split("<nodeId>")
+    .join(nodeId)
+    .split("{nodeId}")
+    .join(nodeId)
+    .split("${nodeId}")
+    .join(nodeId);
+
+  saveBootstrapState({
+    nodeId,
+    rabbitmqUrl,
+    queue,
+    publishExchange,
+    registeredAt: new Date().toISOString(),
+  });
+
+  logger.info({ nodeId, rabbitmqUrl, queue, publishExchange }, "Registration complete; connecting to RabbitMQ");
+  const ctx = await createConnection(rabbitmqUrl, publishExchange);
   logger.info("RabbitMQ connected");
 
-  publish(ctx.channel, "node.registered", {
-    nodeId,
-    publicKey: getPublicKey(),
-    totalCpu: specs.totalCpu,
-    totalMemoryMb: specs.totalMemoryMb,
-    allocatableCpu,
-    allocatableMemoryMb,
-    timestamp: new Date().toISOString(),
-  });
-  logger.info({ nodeId, allocatableCpu, allocatableMemoryMb }, "Node registered, publishing to Scheduler");
-
-  const publishJobEvent = (routingKey: string, payload: Record<string, unknown>): void => {
-    publish(ctx.channel, routingKey, payload);
+  const publishNodeEvent = (event: string, payload: Record<string, unknown>): void => {
+    const routingKey = `node.${nodeId}.events`;
+    publish(ctx.channel, ctx.publishExchange, routingKey, {
+      event,
+      nodeId,
+      timestamp: new Date().toISOString(),
+      ...payload,
+    });
   };
 
   const workerPool = new WorkerPool({
@@ -59,13 +85,17 @@ async function main(): Promise<void> {
     jobTimeoutMs: config.JOB_TIMEOUT_MS,
     onJobResult: ({ jobId, exitCode, timedOut, output, error }) => {
       if (timedOut) {
-        publishJobEvent("job.timeout", { jobId });
+        publishNodeEvent("job.timeout", { jobId, output: output ?? "" });
       } else if (error) {
-        publishJobEvent("job.failed", { jobId, error: error.message, output: output ?? "" });
+        publishNodeEvent("job.failed", { jobId, error: error.message, output: output ?? "" });
       } else if (exitCode === 0) {
-        publishJobEvent("job.completed", { jobId, exitCode, output: output ?? "" });
+        publishNodeEvent("job.completed", { jobId, exitCode, output: output ?? "" });
       } else {
-        publishJobEvent("job.failed", { jobId, error: `Exit code ${exitCode}`, output: output ?? "" });
+        publishNodeEvent("job.failed", {
+          jobId,
+          error: `Exit code ${exitCode}`,
+          output: output ?? "",
+        });
       }
     },
   });
@@ -73,7 +103,7 @@ async function main(): Promise<void> {
   logger.info({ nodeId, maxConcurrency }, "Starting job consumer");
   const consumerTag = await consume(
     ctx.channel,
-    nodeId,
+    queue,
     maxConcurrency,
     async (payload: unknown) => {
       const msg = payload as ScheduledJobMessage;
@@ -105,7 +135,7 @@ async function main(): Promise<void> {
         );
       }
 
-      publishJobEvent("job.started", { jobId: job.jobId });
+      publishNodeEvent("job.started", { jobId: job.jobId });
       logger.info({ jobId: job.jobId }, "Job started, running container");
 
       await workerPool.run(job);
@@ -114,18 +144,13 @@ async function main(): Promise<void> {
   );
 
   const heartbeatInterval = setInterval(() => {
-    const usage = resourceMonitor.getUsage();
     const { availableCpu, availableMemoryMb } = resourceMonitor.getAvailable();
-    publishHeartbeat(ctx.channel, {
+    sendHeartbeat(config.SCHEDULER_BASE_URL, {
       nodeId,
-      totalCpu: specs.totalCpu,
-      totalMemoryMb: specs.totalMemoryMb,
-      usedCpu: usage.usedCpu,
-      usedMemoryMb: usage.usedMemoryMb,
       availableCpu,
-      availableMemoryMb,
-      timestamp: new Date().toISOString(),
-      draining: workerPool.isDraining(),
+      availableMemoryMB: availableMemoryMb,
+    }).catch((err) => {
+      logger.warn({ err, nodeId }, "Heartbeat failed");
     });
   }, config.HEARTBEAT_INTERVAL_MS);
 
@@ -144,18 +169,13 @@ async function main(): Promise<void> {
       drainWaiter: () => workerPool.hasActiveJobs(),
       steps: [
         async () => {
-          const usage = resourceMonitor.getUsage();
           const { availableCpu, availableMemoryMb } = resourceMonitor.getAvailable();
-          publishHeartbeat(ctx.channel, {
+          await sendHeartbeat(config.SCHEDULER_BASE_URL, {
             nodeId,
-            totalCpu: specs.totalCpu,
-            totalMemoryMb: specs.totalMemoryMb,
-            usedCpu: usage.usedCpu,
-            usedMemoryMb: usage.usedMemoryMb,
             availableCpu,
-            availableMemoryMb,
-            timestamp: new Date().toISOString(),
-            draining: true,
+            availableMemoryMB: availableMemoryMb,
+          }).catch((err) => {
+            logger.warn({ err, nodeId }, "Final heartbeat failed");
           });
         },
         () => closeConnection(ctx),
