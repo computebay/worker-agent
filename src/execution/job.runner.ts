@@ -13,6 +13,7 @@ import {
   downloadArtifact,
   extractZipToDir,
   uploadOutputArtifact,
+  uploadOutputFromStdout,
 } from "../libs/artifact.download.js";
 import type { S3Config } from "../libs/s3.js";
 import { logger } from "../utils/logger.js";
@@ -21,7 +22,7 @@ export interface JobRunResult {
   exitCode: number;
   timedOut: boolean;
   output: string;
-  /** Set when job produced /workspace/output.zip and it was uploaded to MinIO (outputs/<jobId>/result.zip). */
+  /** Set when output was uploaded to MinIO (outputs/<jobId>/result.zip): either from /workspace/output.zip or from stdout. */
   outputObjectKey?: string;
 }
 
@@ -173,14 +174,26 @@ export async function runJob(
   });
 
   let outputObjectKey: string | undefined;
-  if (workDirPath && artifactConfig) {
+  if (artifactConfig) {
     try {
-      outputObjectKey = await uploadOutputArtifact(
-        artifactConfig.s3Config,
-        job.jobId,
-        workDirPath
-      );
-      if (outputObjectKey) {
+      if (workDirPath) {
+        outputObjectKey = await uploadOutputArtifact(
+          artifactConfig.s3Config,
+          job.jobId,
+          workDirPath
+        );
+      }
+      if (!outputObjectKey && output) {
+        outputObjectKey = await uploadOutputFromStdout(
+          artifactConfig.s3Config,
+          job.jobId,
+          output
+        );
+        logger.info(
+          { jobId: job.jobId, outputObjectKey },
+          "Uploaded stdout as output artifact to MinIO"
+        );
+      } else if (outputObjectKey) {
         logger.info(
           { jobId: job.jobId, outputObjectKey },
           "Uploaded output artifact to MinIO"
@@ -192,13 +205,8 @@ export async function runJob(
         "Failed to upload output artifact"
       );
     }
-    try {
-      await rm(workDirPath, { recursive: true, force: true });
-      logger.info({ jobId: job.jobId, workDirPath }, "Cleaned up job working directory");
-    } catch (cleanupErr) {
-      logger.warn({ err: cleanupErr, jobId: job.jobId, workDirPath }, "Failed to cleanup work dir");
-    }
-  } else if (workDirPath) {
+  }
+  if (workDirPath) {
     try {
       await rm(workDirPath, { recursive: true, force: true });
       logger.info({ jobId: job.jobId, workDirPath }, "Cleaned up job working directory");

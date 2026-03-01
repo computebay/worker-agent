@@ -72,3 +72,20 @@ export async function uploadOutputArtifact(
     throw err;
   }
 }
+
+/**
+ * Build a zip containing stdout/stderr as output.txt, then upload to MinIO at outputs/<jobId>/result.zip.
+ * Used when the container did not produce output.zip.
+ */
+export async function uploadOutputFromStdout(
+  config: S3Config,
+  jobId: string,
+  output: string
+): Promise<string> {
+  const zip = new JSZip();
+  zip.file("output.txt", output);
+  const body = await zip.generateAsync({ type: "nodebuffer" });
+  const objectKey = `${OUTPUT_ARTIFACT_KEY_PREFIX}/${jobId}/result.zip`;
+  await putObjectBuffer(config, objectKey, body);
+  return objectKey;
+}
