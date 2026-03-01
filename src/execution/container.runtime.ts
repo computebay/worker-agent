@@ -43,7 +43,7 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     env = {},
     workDir,
     mounts = [],
-    networkEnabled = false,
+    // networkEnabled = false,
     runAsUser,
   } = options;
 
@@ -57,11 +57,14 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     "--memory",
     `${memoryMb}m`,
     "--network",
-    networkEnabled ? "bridge" : "none",
+    "bridge",  // always bridge, DNS won't work with "none" anyway
+    "--dns",
+    "8.8.8.8",
+    "--dns",
+    "8.8.4.4",
     "--pids-limit",
     "64",
     "--read-only",
-    // tmpfs mounts so pip/npm have writable temp space without persisting to host
     "--tmpfs",
     "/tmp:rw,noexec,nosuid,size=128m",
     "--tmpfs",
@@ -70,7 +73,6 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     "ALL",
     "--security-opt",
     "no-new-privileges",
-    // Run as the same UID:GID as the host process so bind-mounted files are readable
     ...(runAsUser ? ["--user", runAsUser] : []),
     ...Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
     ...mounts.flatMap((m) => [
