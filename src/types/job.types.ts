@@ -42,6 +42,7 @@ export interface ScheduledJobMessage {
 /**
  * Internal job shape used for container execution (derived from ScheduledJobMessage).
  * When inlineCode is set, the worker runs this JS in a Node container (runtime should be a Node image).
+ * When inputArtifactObjectKey is set, the worker downloads the zip from MinIO, extracts to a temp dir, and mounts it into the container.
  */
 export interface ScheduledJob {
   jobId: string;
@@ -53,11 +54,13 @@ export interface ScheduledJob {
   env?: Record<string, string>;
   /** When set, executed in container via node -e (base64 env). Requires Node image. */
   inlineCode?: string;
+  /** MinIO object key (e.g. inputs/<jobId>/bundle.zip). Worker downloads, extracts, and mounts as workspace. */
+  inputArtifactObjectKey?: string;
 }
 
 /**
  * Maps Job Service payload to internal ScheduledJob.
- * If inputArtifacts.code is a string, it is executed as JS in the container (Node runtime).
+ * Supports: inputArtifacts.objectKey (download zip, mount workspace) or inputArtifacts.code (inline JS, Node runtime).
  */
 export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
   const cpu = msg.resources?.cpu;
@@ -81,8 +84,26 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
   if (!entrypoint.every((e): e is string => typeof e === "string")) {
     throw new InvalidJobPayloadError("entrypoint must be an array of strings", msg);
   }
+  const objectKey =
+    typeof msg.inputArtifacts?.objectKey === "string"
+      ? msg.inputArtifacts.objectKey
+      : undefined;
   const inlineCode =
     typeof msg.inputArtifacts?.code === "string" ? msg.inputArtifacts.code : undefined;
+
+  if (objectKey && inlineCode) {
+    throw new InvalidJobPayloadError(
+      "inputArtifacts must have exactly one of objectKey or code",
+      msg
+    );
+  }
+  if (!objectKey && !inlineCode) {
+    throw new InvalidJobPayloadError(
+      "inputArtifacts must have objectKey (MinIO key) or code (inline string)",
+      msg
+    );
+  }
+
   return {
     jobId: msg.jobId,
     image: msg.runtime,
@@ -90,6 +111,7 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
     cpu,
     memoryMB,
     inlineCode,
+    inputArtifactObjectKey: objectKey,
   };
 }
 

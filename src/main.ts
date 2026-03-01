@@ -1,3 +1,5 @@
+import path from "node:path";
+import os from "node:os";
 import { loadConfig } from "./config/config.js";
 import { getMachineId } from "./security/identity.js";
 import { detectSystemSpecs } from "./monitoring/system.specs.js";
@@ -36,6 +38,31 @@ async function main(): Promise<void> {
   });
 
   const agentVersion = config.AGENT_VERSION ?? getAgentVersion();
+
+  const jobWorkDir =
+    config.JOB_WORK_DIR ?? path.join(os.tmpdir(), "computebay-jobs");
+  const artifactConfig =
+    config.MINIO_ENDPOINT &&
+    config.MINIO_REGION &&
+    config.MINIO_ACCESS_KEY &&
+    config.MINIO_SECRET_KEY &&
+    config.MINIO_BUCKET
+      ? {
+          s3Config: {
+            endpoint: config.MINIO_ENDPOINT,
+            region: config.MINIO_REGION,
+            accessKey: config.MINIO_ACCESS_KEY,
+            secretKey: config.MINIO_SECRET_KEY,
+            bucket: config.MINIO_BUCKET,
+          },
+          jobWorkDir,
+        }
+      : undefined;
+  if (!artifactConfig) {
+    logger.info(
+      "MinIO not configured; jobs with inputArtifacts.objectKey will fail"
+    );
+  }
 
   const existingBootstrap = loadBootstrapState();
 
@@ -102,6 +129,7 @@ async function main(): Promise<void> {
     resourceMonitor,
     maxConcurrency,
     jobTimeoutMs: config.JOB_TIMEOUT_MS,
+    artifactConfig,
     onJobResult: ({ jobId, exitCode, timedOut, output, error }) => {
       if (timedOut) {
         publishNodeEvent("job.timeout", { jobId, output: output ?? "" });

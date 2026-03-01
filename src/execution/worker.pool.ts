@@ -1,6 +1,6 @@
 import type { ScheduledJob } from "../types/job.types.js";
 import type { ResourceMonitor } from "../monitoring/resource.monitor.js";
-import { runJob } from "./job.runner.js";
+import { runJob, type ArtifactConfig } from "./job.runner.js";
 import { logger } from "../utils/logger.js";
 
 export type JobResultCallback = (result: {
@@ -17,6 +17,8 @@ export interface WorkerPoolOptions {
   maxConcurrency: number;
   jobTimeoutMs: number;
   onJobResult: JobResultCallback;
+  /** Required when jobs use inputArtifacts.objectKey (MinIO zip download). */
+  artifactConfig?: ArtifactConfig;
 }
 
 /**
@@ -31,6 +33,7 @@ export class WorkerPool {
   private readonly maxConcurrency: number;
   private readonly jobTimeoutMs: number;
   private readonly onJobResult: JobResultCallback;
+  private readonly artifactConfig: ArtifactConfig | undefined;
   private activeCount = 0;
   private draining = false;
 
@@ -40,6 +43,7 @@ export class WorkerPool {
     this.maxConcurrency = options.maxConcurrency;
     this.jobTimeoutMs = options.jobTimeoutMs;
     this.onJobResult = options.onJobResult;
+    this.artifactConfig = options.artifactConfig;
   }
 
   canAccept(job: ScheduledJob): boolean {
@@ -60,7 +64,7 @@ export class WorkerPool {
     this.resourceMonitor.allocate(job.cpu, job.memoryMB);
 
     try {
-      const result = await runJob(job, this.jobTimeoutMs);
+      const result = await runJob(job, this.jobTimeoutMs, this.artifactConfig);
       logger.info({ jobId: job.jobId, exitCode: result.exitCode, timedOut: result.timedOut }, "Job completed");
       this.onJobResult({
         jobId: job.jobId,

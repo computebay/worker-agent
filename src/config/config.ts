@@ -11,6 +11,14 @@ const configSchema = z.object({
   MAX_CONCURRENCY: z.coerce.number().int().positive().optional(),
   JOB_TIMEOUT_MS: z.coerce.number().positive().default(3600000),
   AGENT_VERSION: z.string().min(1).optional(),
+  // MinIO / S3 for artifact download (required when jobs use inputArtifacts.objectKey)
+  MINIO_ENDPOINT: z.string().min(1).optional(),
+  MINIO_REGION: z.string().min(1).optional(),
+  MINIO_ACCESS_KEY: z.string().min(1).optional(),
+  MINIO_SECRET_KEY: z.string().min(1).optional(),
+  MINIO_BUCKET: z.string().min(1).optional(),
+  /** Root directory for per-job working dirs (default: os.tmpdir()/computebay-jobs) */
+  JOB_WORK_DIR: z.string().min(1).optional(),
 });
 
 export type Config = z.infer<typeof configSchema>;

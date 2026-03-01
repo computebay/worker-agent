@@ -1,6 +1,11 @@
 import { spawn } from "node:child_process";
 import { logger } from "../utils/logger.js";
 
+export interface ContainerMount {
+  hostPath: string;
+  containerPath: string;
+}
+
 export interface ContainerCreateOptions {
   containerId: string;
   image: string;
@@ -8,6 +13,10 @@ export interface ContainerCreateOptions {
   memoryMb: number;
   command?: string[];
   env?: Record<string, string>;
+  /** Working directory inside the container (e.g. /workspace). */
+  workDir?: string;
+  /** Bind mounts: host path → container path (e.g. extracted artifact dir → /workspace). */
+  mounts?: ContainerMount[];
 }
 
 export interface ContainerResult {
@@ -20,7 +29,16 @@ export interface ContainerResult {
  * Uses: --cpus, --memory, --network none, --pids-limit 64, --read-only, --cap-drop ALL, --security-opt no-new-privileges
  */
 export function createAndStart(options: ContainerCreateOptions): Promise<void> {
-  const { containerId, image, cpu, memoryMb, command = [], env = {} } = options;
+  const {
+    containerId,
+    image,
+    cpu,
+    memoryMb,
+    command = [],
+    env = {},
+    workDir,
+    mounts = [],
+  } = options;
 
   const args = [
     "run",
@@ -41,6 +59,11 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     "--security-opt",
     "no-new-privileges",
     ...Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
+    ...mounts.flatMap((m) => [
+      "--mount",
+      `type=bind,source=${m.hostPath},target=${m.containerPath}`,
+    ]),
+    ...(workDir ? ["-w", workDir] : []),
     image,
     ...command,
   ];
