@@ -75,12 +75,6 @@ export async function runJob(
       { jobId: job.jobId, repoUrl: job.repoUrl, branch: job.branch },
       "Cloning repository"
     );
-    // try {
-    //   await gitClone(job.repoUrl, job.branch, workDirPath);
-    // } catch (err) {
-    //   logger.error({ err, jobId: job.jobId }, "Git clone failed");
-    //   throw err; // Caller will emit job.failed
-    // }
     const repoPath = await gitClone(job.repoUrl, job.branch, workDirPath);
 
     const mounts: ContainerMount[] = [
@@ -208,10 +202,11 @@ export async function runJob(
       onLogChunk(logBuffer);
     }
 
-    // Fetch any logs we might have missed (e.g. if stream ended early)
+    // Fetch full logs from Docker (authoritative; stream may miss output if container exits quickly)
     let output = "";
     try {
       output = await getContainerLogs(containerId);
+      await writeFile(logFilePath, output || "(no output)");
     } catch (logErr) {
       logger.warn({ jobId: job.jobId, err: logErr }, "Failed to fetch container logs");
     }
