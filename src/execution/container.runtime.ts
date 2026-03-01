@@ -17,6 +17,8 @@ export interface ContainerCreateOptions {
   workDir?: string;
   /** Bind mounts: host path → container path (e.g. extracted artifact dir → /workspace). */
   mounts?: ContainerMount[];
+  /** Enable network (default: false, uses --network none). Set true for scraping jobs. */
+  networkEnabled?: boolean;
 }
 
 export interface ContainerResult {
@@ -26,7 +28,7 @@ export interface ContainerResult {
 
 /**
  * Pure Docker CLI wrapper. No business logic.
- * Uses: --cpus, --memory, --network none, --pids-limit 64, --read-only, --cap-drop ALL, --security-opt no-new-privileges
+ * Uses: --cpus, --memory, --network none (or bridge if networkEnabled), --pids-limit 64, --read-only, --cap-drop ALL, --security-opt no-new-privileges
  */
 export function createAndStart(options: ContainerCreateOptions): Promise<void> {
   const {
@@ -38,6 +40,7 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     env = {},
     workDir,
     mounts = [],
+    networkEnabled = false,
   } = options;
 
   const args = [
@@ -50,7 +53,7 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     "--memory",
     `${memoryMb}m`,
     "--network",
-    "none",
+    networkEnabled ? "bridge" : "none",
     "--pids-limit",
     "64",
     "--read-only",
@@ -156,6 +159,47 @@ export function getContainerLogs(containerId: string): Promise<string> {
     });
     proc.on("error", reject);
   });
+}
+
+export interface LogStreamCallbacks {
+  onChunk: (chunk: string) => void;
+  onEnd: () => void;
+  onError: (err: Error) => void;
+}
+
+/**
+ * Stream container logs via docker logs -f.
+ * Calls onChunk for each chunk, onEnd when process exits, onError on failure.
+ * Returns a function to kill the log stream process.
+ */
+export function streamContainerLogs(
+  containerId: string,
+  callbacks: LogStreamCallbacks
+): () => void {
+  const proc = spawn("docker", ["logs", "-f", "--tail", "0", containerId], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  proc.stdout?.on("data", (chunk) => {
+    callbacks.onChunk(chunk.toString());
+  });
+  proc.stderr?.on("data", (chunk) => {
+    callbacks.onChunk(chunk.toString());
+  });
+  proc.on("close", (code) => {
+    if (code === 0 || code === 1) {
+      callbacks.onEnd();
+    } else {
+      callbacks.onError(new Error(`docker logs -f exited with code ${code}`));
+    }
+  });
+  proc.on("error", (err) => {
+    callbacks.onError(err);
+  });
+
+  return () => {
+    proc.kill("SIGTERM");
+  };
 }
 
 export function waitContainer(containerId: string): Promise<ContainerResult> {

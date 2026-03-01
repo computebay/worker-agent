@@ -1,5 +1,6 @@
-import { rm } from "node:fs/promises";
+import { mkdtemp, rm, appendFile } from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
 import type { ScheduledJob } from "../types/job.types.js";
 import {
   createAndStart,
@@ -7,14 +8,11 @@ import {
   killContainer,
   removeContainer,
   waitContainer,
+  streamContainerLogs,
   type ContainerMount,
 } from "./container.runtime.js";
-import {
-  downloadArtifact,
-  extractZipToDir,
-  uploadOutputArtifact,
-  uploadOutputFromStdout,
-} from "../libs/artifact.download.js";
+import { gitClone } from "../libs/git.clone.js";
+import { uploadLogFile } from "../libs/log.upload.js";
 import type { S3Config } from "../libs/s3.js";
 import { logger } from "../utils/logger.js";
 
@@ -22,191 +20,205 @@ export interface JobRunResult {
   exitCode: number;
   timedOut: boolean;
   output: string;
-  /** Set when output was uploaded to MinIO (outputs/<jobId>/result.zip): either from /workspace/output.zip or from stdout. */
-  outputObjectKey?: string;
+  /** MinIO object key for full log: logs/<jobId>/full.log */
+  logObjectKey?: string;
 }
 
-/** Required when job has inputArtifactObjectKey: MinIO config and root dir for per-job work dirs. */
-export interface ArtifactConfig {
+/** Required for log upload to MinIO. */
+export interface LogUploadConfig {
   s3Config: S3Config;
-  jobWorkDir: string;
 }
-
-/** Node -e snippet that runs code from CODE_B64 env (avoids shell escaping). */
-const NODE_EVAL_CODE =
-  "eval(require('buffer').Buffer.from(process.env.CODE_B64,'base64').toString('utf8'))";
 
 const CONTAINER_WORKSPACE = "/workspace";
 
-function buildContainerOptions(
-  job: ScheduledJob,
-  workDirPath?: string
-): {
-  image: string;
-  command: string[];
-  env: Record<string, string>;
-  workDir?: string;
-  mounts?: ContainerMount[];
-} {
-  if (job.inlineCode) {
-    const codeB64 = Buffer.from(job.inlineCode, "utf8").toString("base64");
-    return {
-      image: job.image,
-      command: ["node", "-e", NODE_EVAL_CODE],
-      env: { ...job.env, CODE_B64: codeB64 },
-    };
-  }
-  const base = {
-    image: job.image,
-    command: job.command,
-    env: job.env ?? {},
-  };
-  if (workDirPath) {
-    return {
-      ...base,
-      workDir: CONTAINER_WORKSPACE,
-      mounts: [{ hostPath: workDirPath, containerPath: CONTAINER_WORKSPACE }],
-    };
-  }
-  return base;
+/** Chunk size for streaming logs to RabbitMQ (bytes). */
+const LOG_CHUNK_SIZE = 4096;
+
+export interface RunJobOptions {
+  timeoutMs: number;
+  logUploadConfig?: LogUploadConfig;
+  /** Called with log chunks for streaming to RabbitMQ. */
+  onLogChunk?: (chunk: string) => void;
+  /** When aborted, kills the container. */
+  abortSignal?: AbortSignal;
 }
 
 export async function runJob(
   job: ScheduledJob,
-  timeoutMs: number,
-  artifactConfig?: ArtifactConfig
+  options: RunJobOptions
 ): Promise<JobRunResult> {
+  const {
+    timeoutMs,
+    logUploadConfig,
+    onLogChunk,
+    abortSignal,
+  } = options;
+
   const containerId = `computebay-${job.jobId}`;
-  let workDirPath: string | undefined;
 
-  if (job.inputArtifactObjectKey) {
-    if (!artifactConfig) {
-      throw new Error(
-        "Job has inputArtifactObjectKey but MinIO/artifact config is not set. Set MINIO_* and JOB_WORK_DIR."
-      );
-    }
-    workDirPath = path.join(artifactConfig.jobWorkDir, job.jobId);
+  // Create temp working directory
+  const workDirPath = await mkdtemp(path.join(os.tmpdir(), `computebay-${job.jobId}-`));
+  const logFilePath = path.join(workDirPath, "full.log");
+
+  try {
+    // Git clone
+    logger.info(
+      { jobId: job.jobId, repoUrl: job.repoUrl, branch: job.branch },
+      "Cloning repository"
+    );
     try {
-      logger.info(
-        { jobId: job.jobId, objectKey: job.inputArtifactObjectKey },
-        "Downloading artifact from MinIO"
-      );
-      const zipBuffer = await downloadArtifact(
-        artifactConfig.s3Config,
-        job.inputArtifactObjectKey
-      );
-      await extractZipToDir(zipBuffer, workDirPath);
-      logger.info({ jobId: job.jobId, workDirPath }, "Artifact extracted");
+      await gitClone(job.repoUrl, job.branch, workDirPath);
     } catch (err) {
-      logger.error({ err, jobId: job.jobId }, "Artifact download or extract failed");
-      throw err;
+      logger.error({ err, jobId: job.jobId }, "Git clone failed");
+      throw err; // Caller will emit job.failed
     }
-  }
 
-  const opts = buildContainerOptions(job, workDirPath);
-  logger.info(
-    {
-      jobId: job.jobId,
-      containerId,
-      image: opts.image,
-      hasInlineCode: Boolean(job.inlineCode),
-      hasWorkspaceMount: Boolean(workDirPath),
-    },
-    "Starting job"
-  );
+    const mounts: ContainerMount[] = [
+      { hostPath: workDirPath, containerPath: CONTAINER_WORKSPACE },
+    ];
+    const command = ["sh", "-c", job.startCommand];
 
-  try {
-    await createAndStart({
-      containerId,
-      image: opts.image,
-      cpu: job.cpu,
-      memoryMb: job.memoryMB,
-      command: opts.command,
-      env: opts.env,
-      workDir: opts.workDir,
-      mounts: opts.mounts,
-    });
-  } catch (err) {
-    logger.error({ err, jobId: job.jobId }, "Failed to create container");
-    await removeContainer(containerId).catch(() => {});
-    throw err;
-  }
+    logger.info(
+      {
+        jobId: job.jobId,
+        containerId,
+        image: job.image,
+        startCommand: job.startCommand,
+      },
+      "Starting job container"
+    );
 
-  const jobTimeoutMs = job.timeoutMs ?? timeoutMs;
-  let timedOut = false;
-  logger.info({ jobId: job.jobId, timeoutMs: jobTimeoutMs }, "Waiting for container");
+    const env = {
+      HOME: CONTAINER_WORKSPACE,
+      ...(job.env ?? {}),
+    };
 
-  const waitPromise = waitContainer(containerId);
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(() => {
-      timedOut = true;
-      killContainer(containerId)
-        .then(() => reject(new Error("TIMEOUT")))
-        .catch(reject);
-    }, jobTimeoutMs);
-  });
-
-  let exitCode: number;
-  try {
-    const result = await Promise.race([waitPromise, timeoutPromise]);
-    exitCode = result.exitCode;
-  } catch (err) {
-    if (timedOut || (err instanceof Error && err.message === "TIMEOUT")) {
-      timedOut = true;
-      exitCode = 137;
-      logger.warn({ jobId: job.jobId, containerId }, "Job timed out, container killed");
-    } else {
-      logger.error({ err, jobId: job.jobId }, "Container wait/kill error");
-      throw err;
-    }
-  }
-
-  let output = "";
-  try {
-    output = await getContainerLogs(containerId);
-    logger.info({ jobId: job.jobId, exitCode, timedOut, output }, "Job output");
-  } catch (logErr) {
-    logger.warn({ jobId: job.jobId, err: logErr }, "Failed to fetch container logs");
-  }
-
-  await removeContainer(containerId).catch((err) => {
-    logger.warn({ err, containerId }, "Failed to remove container");
-  });
-
-  let outputObjectKey: string | undefined;
-  if (artifactConfig) {
     try {
-      if (workDirPath) {
-        outputObjectKey = await uploadOutputArtifact(
-          artifactConfig.s3Config,
-          job.jobId,
-          workDirPath
-        );
-      }
-      if (!outputObjectKey && output) {
-        outputObjectKey = await uploadOutputFromStdout(
-          artifactConfig.s3Config,
-          job.jobId,
-          output
-        );
-        logger.info(
-          { jobId: job.jobId, outputObjectKey },
-          "Uploaded stdout as output artifact to MinIO"
-        );
-      } else if (outputObjectKey) {
-        logger.info(
-          { jobId: job.jobId, outputObjectKey },
-          "Uploaded output artifact to MinIO"
-        );
-      }
-    } catch (uploadErr) {
-      logger.warn(
-        { err: uploadErr, jobId: job.jobId },
-        "Failed to upload output artifact"
-      );
+      await createAndStart({
+        containerId,
+        image: job.image,
+        cpu: job.cpu,
+        memoryMb: job.memoryMB,
+        command,
+        env,
+        workDir: CONTAINER_WORKSPACE,
+        mounts,
+        networkEnabled: job.networkEnabled,
+      });
+    } catch (err) {
+      logger.error({ err, jobId: job.jobId }, "Failed to create container");
+      await removeContainer(containerId).catch(() => {});
+      throw err;
     }
-  }
-  if (workDirPath) {
+
+    // Stream logs: append to file and emit chunks
+    let logBuffer = "";
+    const flushChunk = (): void => {
+      if (logBuffer.length >= LOG_CHUNK_SIZE && onLogChunk) {
+        onLogChunk(logBuffer);
+        logBuffer = "";
+      }
+    };
+
+    const stopLogStream = streamContainerLogs(containerId, {
+      onChunk: async (chunk) => {
+        await appendFile(logFilePath, chunk);
+        logBuffer += chunk;
+        flushChunk();
+      },
+      onEnd: () => flushChunk(),
+      onError: (err) => logger.warn({ err, jobId: job.jobId }, "Log stream error"),
+    });
+
+    const jobTimeoutMs = job.timeoutMs ?? timeoutMs;
+    let timedOut = false;
+
+    const waitPromise = waitContainer(containerId);
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => {
+        timedOut = true;
+        killContainer(containerId)
+          .then(() => reject(new Error("TIMEOUT")))
+          .catch(reject);
+      }, jobTimeoutMs);
+    });
+
+    const abortPromise = abortSignal
+      ? new Promise<never>((_, reject) => {
+          const onAbort = (): void => {
+            killContainer(containerId)
+              .then(() => reject(new Error("CANCELLED")))
+              .catch(reject);
+          };
+          if (abortSignal.aborted) {
+            onAbort();
+          } else {
+            abortSignal.addEventListener("abort", onAbort, { once: true });
+          }
+        })
+      : new Promise<never>(() => {}); // Never resolves
+
+    let exitCode: number;
+    try {
+      const result = await Promise.race([
+        waitPromise,
+        timeoutPromise,
+        abortPromise,
+      ]);
+      exitCode = result.exitCode;
+    } catch (err) {
+      if (timedOut || (err instanceof Error && err.message === "TIMEOUT")) {
+        timedOut = true;
+        exitCode = 137;
+        logger.warn({ jobId: job.jobId, containerId }, "Job timed out, container killed");
+      } else if (err instanceof Error && err.message === "CANCELLED") {
+        exitCode = 137;
+        logger.info({ jobId: job.jobId, containerId }, "Job cancelled, container killed");
+      } else {
+        logger.error({ err, jobId: job.jobId }, "Container wait/kill error");
+        throw err;
+      }
+    } finally {
+      stopLogStream();
+    }
+
+    // Flush remaining log buffer
+    if (logBuffer && onLogChunk) {
+      onLogChunk(logBuffer);
+    }
+
+    // Fetch any logs we might have missed (e.g. if stream ended early)
+    let output = "";
+    try {
+      output = await getContainerLogs(containerId);
+    } catch (logErr) {
+      logger.warn({ jobId: job.jobId, err: logErr }, "Failed to fetch container logs");
+    }
+
+    await removeContainer(containerId).catch((err) => {
+      logger.warn({ err, containerId }, "Failed to remove container");
+    });
+
+    // Upload full log to MinIO
+    let logObjectKey: string | undefined;
+    if (logUploadConfig) {
+      try {
+        logObjectKey = await uploadLogFile(
+          logUploadConfig.s3Config,
+          job.jobId,
+          logFilePath
+        );
+        logger.info({ jobId: job.jobId, logObjectKey }, "Uploaded log to MinIO");
+      } catch (uploadErr) {
+        logger.warn(
+          { err: uploadErr, jobId: job.jobId },
+          "Failed to upload log to MinIO"
+        );
+      }
+    }
+
+    return { exitCode, timedOut, output, logObjectKey };
+  } finally {
     try {
       await rm(workDirPath, { recursive: true, force: true });
       logger.info({ jobId: job.jobId, workDirPath }, "Cleaned up job working directory");
@@ -214,6 +226,4 @@ export async function runJob(
       logger.warn({ err: cleanupErr, jobId: job.jobId, workDirPath }, "Failed to cleanup work dir");
     }
   }
-
-  return { exitCode, timedOut, output, outputObjectKey };
 }

@@ -1,5 +1,3 @@
-import path from "node:path";
-import os from "node:os";
 import { loadConfig } from "./config/config.js";
 import { getMachineId } from "./security/identity.js";
 import { detectSystemSpecs } from "./monitoring/system.specs.js";
@@ -39,9 +37,7 @@ async function main(): Promise<void> {
 
   const agentVersion = config.AGENT_VERSION ?? getAgentVersion();
 
-  const jobWorkDir =
-    config.JOB_WORK_DIR ?? path.join(os.tmpdir(), "computebay-jobs");
-  const artifactConfig =
+  const logUploadConfig =
     config.MINIO_ENDPOINT &&
     config.MINIO_REGION &&
     config.MINIO_ACCESS_KEY &&
@@ -55,13 +51,10 @@ async function main(): Promise<void> {
             secretKey: config.MINIO_SECRET_KEY,
             bucket: config.MINIO_BUCKET,
           },
-          jobWorkDir,
         }
       : undefined;
-  if (!artifactConfig) {
-    logger.info(
-      "MinIO not configured; jobs with inputArtifacts.objectKey will fail"
-    );
+  if (!logUploadConfig) {
+    logger.info("MinIO not configured; logs will not be uploaded");
   }
 
   const existingBootstrap = loadBootstrapState();
@@ -129,8 +122,11 @@ async function main(): Promise<void> {
     resourceMonitor,
     maxConcurrency,
     jobTimeoutMs: config.JOB_TIMEOUT_MS,
-    artifactConfig,
-    onJobResult: ({ jobId, exitCode, timedOut, output, outputObjectKey, error }) => {
+    logUploadConfig,
+    onLogChunk: (jobId, chunk) => {
+      publishNodeEvent("job.log.chunk", { jobId, chunk });
+    },
+    onJobResult: ({ jobId, exitCode, timedOut, output, logObjectKey, error }) => {
       if (timedOut) {
         publishNodeEvent("job.timeout", { jobId, output: output ?? "" });
       } else if (error) {
@@ -140,7 +136,7 @@ async function main(): Promise<void> {
           jobId,
           exitCode,
           output: output ?? "",
-          ...(outputObjectKey != null ? { outputObjectKey } : {}),
+          ...(logObjectKey != null ? { logObjectKey } : {}),
         });
       } else {
         publishNodeEvent("job.failed", {
@@ -164,16 +160,17 @@ async function main(): Promise<void> {
         !msg.jobId ||
         !msg.jobType ||
         !msg.runtime ||
-        !Array.isArray(msg.entrypoint) ||
+        !msg.repoUrl ||
+        typeof msg.repoUrl !== "string" ||
+        !msg.startCommand ||
+        typeof msg.startCommand !== "string" ||
         !msg.resources ||
         typeof msg.resources !== "object" ||
-        !msg.inputArtifacts ||
-        typeof msg.inputArtifacts !== "object" ||
         !msg.orgId
       ) {
         logger.warn(
           { payload },
-          "Invalid job payload: must match CreateJobInput (jobId, jobType, runtime, entrypoint, resources, inputArtifacts, orgId). Discarding (no requeue)."
+          "Invalid job payload: must match CreateJobInput (jobId, jobType, runtime, repoUrl, startCommand, resources, orgId). Discarding (no requeue)."
         );
         throw new InvalidJobPayloadError("Payload missing required CreateJobInput fields", payload);
       }

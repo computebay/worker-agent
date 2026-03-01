@@ -51,3 +51,39 @@ export async function cancelConsumer(channel: Channel, consumerTag: string): Pro
     // Consumer may already be gone
   }
 }
+
+export type CancelHandler = (jobId: string) => void;
+
+/**
+ * Consume job cancel requests from a queue.
+ * Message format: { jobId: string }
+ * Returns consumerTag for cancellation.
+ */
+export async function consumeCancel(
+  channel: Channel,
+  cancelQueue: string,
+  onCancel: CancelHandler
+): Promise<string> {
+  await channel.assertQueue(cancelQueue, { durable: true });
+
+  const { consumerTag } = await channel.consume(
+    cancelQueue,
+    (msg) => {
+      if (!msg) return;
+      try {
+        const payload = JSON.parse(msg.content.toString("utf-8"));
+        const jobId = payload?.jobId;
+        if (typeof jobId === "string") {
+          onCancel(jobId);
+        }
+        channel.ack(msg);
+      } catch {
+        channel.nack(msg, false, false);
+      }
+    },
+    { noAck: false }
+  );
+
+  logger.info({ cancelQueue }, "Cancel consumer started");
+  return consumerTag;
+}
