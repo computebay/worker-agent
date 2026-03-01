@@ -8,6 +8,8 @@ export type JobResultCallback = (result: {
   exitCode: number;
   timedOut: boolean;
   output: string;
+  /** Set when job produced /workspace/output.zip and it was uploaded to MinIO. */
+  outputObjectKey?: string;
   error?: Error;
 }) => void;
 
@@ -71,6 +73,7 @@ export class WorkerPool {
         exitCode: result.exitCode,
         timedOut: result.timedOut,
         output: result.output,
+        outputObjectKey: result.outputObjectKey,
       });
     } catch (err) {
       logger.error({ err, jobId: job.jobId }, "Job execution failed");

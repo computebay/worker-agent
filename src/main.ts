@@ -130,13 +130,18 @@ async function main(): Promise<void> {
     maxConcurrency,
     jobTimeoutMs: config.JOB_TIMEOUT_MS,
     artifactConfig,
-    onJobResult: ({ jobId, exitCode, timedOut, output, error }) => {
+    onJobResult: ({ jobId, exitCode, timedOut, output, outputObjectKey, error }) => {
       if (timedOut) {
         publishNodeEvent("job.timeout", { jobId, output: output ?? "" });
       } else if (error) {
         publishNodeEvent("job.failed", { jobId, error: error.message, output: output ?? "" });
       } else if (exitCode === 0) {
-        publishNodeEvent("job.completed", { jobId, exitCode, output: output ?? "" });
+        publishNodeEvent("job.completed", {
+          jobId,
+          exitCode,
+          output: output ?? "",
+          ...(outputObjectKey != null ? { outputObjectKey } : {}),
+        });
       } else {
         publishNodeEvent("job.failed", {
           jobId,

@@ -9,7 +9,11 @@ import {
   waitContainer,
   type ContainerMount,
 } from "./container.runtime.js";
-import { downloadArtifact, extractZipToDir } from "../libs/artifact.download.js";
+import {
+  downloadArtifact,
+  extractZipToDir,
+  uploadOutputArtifact,
+} from "../libs/artifact.download.js";
 import type { S3Config } from "../libs/s3.js";
 import { logger } from "../utils/logger.js";
 
@@ -17,6 +21,8 @@ export interface JobRunResult {
   exitCode: number;
   timedOut: boolean;
   output: string;
+  /** Set when job produced /workspace/output.zip and it was uploaded to MinIO (outputs/<jobId>/result.zip). */
+  outputObjectKey?: string;
 }
 
 /** Required when job has inputArtifactObjectKey: MinIO config and root dir for per-job work dirs. */
@@ -166,7 +172,33 @@ export async function runJob(
     logger.warn({ err, containerId }, "Failed to remove container");
   });
 
-  if (workDirPath) {
+  let outputObjectKey: string | undefined;
+  if (workDirPath && artifactConfig) {
+    try {
+      outputObjectKey = await uploadOutputArtifact(
+        artifactConfig.s3Config,
+        job.jobId,
+        workDirPath
+      );
+      if (outputObjectKey) {
+        logger.info(
+          { jobId: job.jobId, outputObjectKey },
+          "Uploaded output artifact to MinIO"
+        );
+      }
+    } catch (uploadErr) {
+      logger.warn(
+        { err: uploadErr, jobId: job.jobId },
+        "Failed to upload output artifact"
+      );
+    }
+    try {
+      await rm(workDirPath, { recursive: true, force: true });
+      logger.info({ jobId: job.jobId, workDirPath }, "Cleaned up job working directory");
+    } catch (cleanupErr) {
+      logger.warn({ err: cleanupErr, jobId: job.jobId, workDirPath }, "Failed to cleanup work dir");
+    }
+  } else if (workDirPath) {
     try {
       await rm(workDirPath, { recursive: true, force: true });
       logger.info({ jobId: job.jobId, workDirPath }, "Cleaned up job working directory");
@@ -175,5 +207,5 @@ export async function runJob(
     }
   }
 
-  return { exitCode, timedOut, output };
+  return { exitCode, timedOut, output, outputObjectKey };
 }

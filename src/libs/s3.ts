@@ -1,6 +1,7 @@
 import {
   S3Client,
   GetObjectCommand,
+  PutObjectCommand,
   type GetObjectCommandOutput,
 } from "@aws-sdk/client-s3";
 import { Readable } from "node:stream";
@@ -54,4 +55,22 @@ export async function getObjectBuffer(
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   return Buffer.concat(chunks);
+}
+
+/**
+ * Upload a buffer to S3/MinIO at the given key.
+ */
+export async function putObjectBuffer(
+  config: S3Config,
+  key: string,
+  body: Buffer
+): Promise<void> {
+  const s3 = getS3Client(config);
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: config.bucket,
+      Key: key,
+      Body: body,
+    })
+  );
 }

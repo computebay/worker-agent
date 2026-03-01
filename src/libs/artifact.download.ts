@@ -1,8 +1,8 @@
 import JSZip from "jszip";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile } from "node:fs/promises";
 import path from "node:path";
 import type { S3Config } from "./s3.js";
-import { getObjectBuffer } from "./s3.js";
+import { getObjectBuffer, putObjectBuffer } from "./s3.js";
 
 /**
  * Download the job input artifact (zip) from MinIO by object key.
@@ -41,5 +41,34 @@ export async function extractZipToDir(
     await mkdir(path.dirname(destResolved), { recursive: true });
     const content = await entry.async("nodebuffer");
     await writeFile(destResolved, content);
+  }
+}
+
+/** Filename the container may write in /workspace for output artifact. */
+export const OUTPUT_ARTIFACT_FILENAME = "output.zip";
+
+/** Object key prefix for job output artifacts in MinIO. */
+export const OUTPUT_ARTIFACT_KEY_PREFIX = "outputs";
+
+/**
+ * If output.zip exists in the job workspace, upload it to MinIO at outputs/<jobId>/result.zip.
+ * Returns the object key if uploaded, otherwise undefined.
+ */
+export async function uploadOutputArtifact(
+  config: S3Config,
+  jobId: string,
+  workDirPath: string
+): Promise<string | undefined> {
+  const outputPath = path.join(workDirPath, OUTPUT_ARTIFACT_FILENAME);
+  try {
+    const body = await readFile(outputPath);
+    const objectKey = `${OUTPUT_ARTIFACT_KEY_PREFIX}/${jobId}/result.zip`;
+    await putObjectBuffer(config, objectKey, body);
+    return objectKey;
+  } catch (err: unknown) {
+    if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") {
+      return undefined;
+    }
+    throw err;
   }
 }
