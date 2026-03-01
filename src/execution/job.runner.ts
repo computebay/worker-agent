@@ -31,9 +31,6 @@ export interface LogUploadConfig {
 
 const CONTAINER_WORKSPACE = "/workspace";
 
-/** Chunk size for streaming logs to RabbitMQ (bytes). */
-const LOG_CHUNK_SIZE = 4096;
-
 export interface RunJobOptions {
   timeoutMs: number;
   logUploadConfig?: LogUploadConfig;
@@ -126,22 +123,15 @@ export async function runJob(
       throw err;
     }
 
-    // Stream logs: append to file and emit chunks
-    let logBuffer = "";
-    const flushChunk = (): void => {
-      if (logBuffer.length >= LOG_CHUNK_SIZE && onLogChunk) {
-        onLogChunk(logBuffer);
-        logBuffer = "";
-      }
-    };
-
+    // Stream logs: append to file and emit chunks immediately
     const stopLogStream = streamContainerLogs(containerId, {
       onChunk: async (chunk) => {
         await appendFile(logFilePath, chunk);
-        logBuffer += chunk;
-        flushChunk();
+        if (onLogChunk) {
+          onLogChunk(chunk);
+        }
       },
-      onEnd: () => flushChunk(),
+      onEnd: () => {},
       onError: (err) => logger.warn({ err, jobId: job.jobId }, "Log stream error"),
     });
 
@@ -195,11 +185,6 @@ export async function runJob(
       }
     } finally {
       stopLogStream();
-    }
-
-    // Flush remaining log buffer
-    if (logBuffer && onLogChunk) {
-      onLogChunk(logBuffer);
     }
 
     // Fetch full logs from Docker (authoritative; stream may miss output if container exits quickly)
