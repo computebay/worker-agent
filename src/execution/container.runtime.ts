@@ -19,6 +19,8 @@ export interface ContainerCreateOptions {
   mounts?: ContainerMount[];
   /** Enable network (default: false, uses --network none). Set true for scraping jobs. */
   networkEnabled?: boolean;
+  /** Run container as this UID:GID (e.g. "1000:1000") to match host file ownership. */
+  runAsUser?: string;
 }
 
 export interface ContainerResult {
@@ -28,7 +30,8 @@ export interface ContainerResult {
 
 /**
  * Pure Docker CLI wrapper. No business logic.
- * Uses: --cpus, --memory, --network none (or bridge if networkEnabled), --pids-limit 64, --read-only, --cap-drop ALL, --security-opt no-new-privileges
+ * Uses: --cpus, --memory, --network none (or bridge if networkEnabled), --pids-limit 64, --read-only,
+ *       --tmpfs /tmp, --tmpfs /var/tmp, --cap-drop ALL, --security-opt no-new-privileges
  */
 export function createAndStart(options: ContainerCreateOptions): Promise<void> {
   const {
@@ -41,6 +44,7 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     workDir,
     mounts = [],
     networkEnabled = false,
+    runAsUser,
   } = options;
 
   const args = [
@@ -57,12 +61,17 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     "--pids-limit",
     "64",
     "--read-only",
-    "--tmpfs", "/tmp:rw,noexec,nosuid,size=128m",
-    "--tmpfs", "/var/tmp:rw,noexec,nosuid,size=64m",
+    // tmpfs mounts so pip/npm have writable temp space without persisting to host
+    "--tmpfs",
+    "/tmp:rw,noexec,nosuid,size=128m",
+    "--tmpfs",
+    "/var/tmp:rw,noexec,nosuid,size=64m",
     "--cap-drop",
     "ALL",
     "--security-opt",
     "no-new-privileges",
+    // Run as the same UID:GID as the host process so bind-mounted files are readable
+    ...(runAsUser ? ["--user", runAsUser] : []),
     ...Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
     ...mounts.flatMap((m) => [
       "--mount",
