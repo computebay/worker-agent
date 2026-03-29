@@ -90,6 +90,11 @@ export class WorkerPool {
       controller.abort();
       this.cancelControllers.delete(jobId);
     }
+    if (serviceRegistry.getService(jobId)) {
+      serviceRegistry.stopService(jobId).catch((err) =>
+        logger.warn({ err, jobId }, "Failed to cancel service job")
+      );
+    }
   }
 
   async run(job: ScheduledJob): Promise<void> {
@@ -173,11 +178,12 @@ export class WorkerPool {
           : undefined,
       });
       serviceRegistry.registerService(
-        { 
+        {
           serviceId: result.serviceId, 
           containerId: result.containerId, 
           port: result.hostPort,
-          stopLogStream: result.stopLogStream 
+          stopLogStream: result.stopLogStream,
+          workDirPath: result.workDirPath
         },
         { cpu: job.cpu, memoryMB: job.memoryMB }
       );

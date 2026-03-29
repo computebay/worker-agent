@@ -1,6 +1,7 @@
 import { logger } from "../utils/logger.js";
 import { killContainer, removeContainer } from "./container.runtime.js";
 import { portManager } from "../network/port.manager.js";
+import { rm } from "node:fs/promises";
 
 export type ServiceStatus = "running" | "stopped" | "failed";
 
@@ -10,6 +11,7 @@ export interface ServiceEntry {
   port: number;
   status: ServiceStatus;
   stopLogStream?: () => void;
+  workDirPath?: string;
 }
 
 type ReleaseCallback = (cpu: number, memoryMB: number) => void;
@@ -66,6 +68,15 @@ class ServiceRegistry {
       await removeContainer(entry.containerId);
     } catch (err) {
       logger.warn({ err, serviceId }, "Remove failed (container may already be gone)");
+    }
+
+    if (entry.workDirPath) {
+      try {
+        await rm(entry.workDirPath, { recursive: true, force: true });
+        logger.info({ workDirPath: entry.workDirPath }, "Cleaned up service working directory");
+      } catch (err) {
+        logger.warn({ err, workDirPath: entry.workDirPath }, "Failed to clean up service working directory");
+      }
     }
 
     portManager.releasePort(entry.port);

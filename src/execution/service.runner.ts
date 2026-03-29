@@ -21,6 +21,7 @@ export interface ServiceStartResult {
   hostPort: number;
   serviceId: string;
   stopLogStream?: () => void;
+  workDirPath?: string;
 }
 
 export interface RunServiceOptions {
@@ -237,5 +238,5 @@ export async function runService(job: ScheduledJob, options?: RunServiceOptions)
     "Service container started and ready"
   );
 
-  return { containerId, hostPort, serviceId: job.jobId, stopLogStream };
+  return { containerId, hostPort, serviceId: job.jobId, stopLogStream, workDirPath };
 }
