@@ -9,6 +9,7 @@ export interface ServiceEntry {
   containerId: string;
   port: number;
   status: ServiceStatus;
+  stopLogStream?: () => void;
 }
 
 type ReleaseCallback = (cpu: number, memoryMB: number) => void;
@@ -46,6 +47,14 @@ class ServiceRegistry {
     }
 
     logger.info({ serviceId, containerId: entry.containerId }, "Stopping service");
+
+    if (entry.stopLogStream) {
+      try {
+        entry.stopLogStream();
+      } catch (err) {
+        logger.warn({ err, serviceId }, "Error stopping log stream");
+      }
+    }
 
     try {
       await killContainer(entry.containerId);

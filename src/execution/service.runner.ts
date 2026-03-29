@@ -10,6 +10,7 @@ import {
   getContainerLogs,
   inspectContainerRunning,
   waitContainer,
+  streamContainerLogs,
 } from "./container.runtime.js";
 import { portManager, isPortFree, waitForPort } from "../network/port.manager.js";
 import { gitClone } from "../libs/git.clone.js";
@@ -19,6 +20,11 @@ export interface ServiceStartResult {
   containerId: string;
   hostPort: number;
   serviceId: string;
+  stopLogStream?: () => void;
+}
+
+export interface RunServiceOptions {
+  onLogChunk?: (chunk: string) => void;
 }
 
 /**
@@ -36,7 +42,7 @@ export interface ServiceStartResult {
  * @throws if Docker fails to start, the container exits during startup,
  *         or the port never becomes ready — releases port before rethrowing.
  */
-export async function runService(job: ScheduledJob): Promise<ServiceStartResult> {
+export async function runService(job: ScheduledJob, options?: RunServiceOptions): Promise<ServiceStartResult> {
   if (job.type !== "service") {
     throw new Error(`runService called with non-service job type: ${job.type}`);
   }
@@ -109,7 +115,18 @@ export async function runService(job: ScheduledJob): Promise<ServiceStartResult>
           runAsUser,
         });
 
+        let stopSetupStream: (() => void) | undefined;
+        if (options?.onLogChunk) {
+          stopSetupStream = streamContainerLogs(setupContainerId, {
+            onChunk: options.onLogChunk,
+            onEnd: () => {},
+            onError: (err) => logger.warn({ err, setupContainerId }, "Setup log stream error"),
+          });
+        }
+
         const { exitCode } = await waitContainer(setupContainerId);
+        if (stopSetupStream) stopSetupStream();
+
         if (exitCode !== 0) {
           const logs = await getContainerLogs(setupContainerId).catch(() => "(no logs)");
           throw new Error(`Dependency installation failed (exit ${exitCode}).\nLogs:\n${logs}`);
@@ -157,7 +174,10 @@ export async function runService(job: ScheduledJob): Promise<ServiceStartResult>
   }
   const command = job.entrypoint ?? (finalStartCommand ? ["sh", "-c", finalStartCommand] : []);
 
+  let stopLogStream: (() => void) | undefined;
+
   const cleanup = async (): Promise<void> => {
+    if (stopLogStream) stopLogStream();
     try { await killContainer(containerId); } catch { /* may not exist */ }
     try { await removeContainer(containerId); } catch { /* may not exist */ }
     portManager.releasePort(hostPort);
@@ -181,6 +201,14 @@ export async function runService(job: ScheduledJob): Promise<ServiceStartResult>
       portBindings: [{ hostPort, containerPort: job.servicePort }],
       runAsUser,
     });
+
+    if (options?.onLogChunk) {
+      stopLogStream = streamContainerLogs(containerId, {
+        onChunk: options.onLogChunk,
+        onEnd: () => {},
+        onError: (err) => logger.warn({ err, containerId }, "Service log stream error"),
+      });
+    }
 
     // Wait for readiness — NOTE: waitForPort probes the host port, which is
     // served by Docker's userland proxy (docker-proxy) and is available almost
@@ -209,5 +237,5 @@ export async function runService(job: ScheduledJob): Promise<ServiceStartResult>
     "Service container started and ready"
   );
 
-  return { containerId, hostPort, serviceId: job.jobId };
+  return { containerId, hostPort, serviceId: job.jobId, stopLogStream };
 }

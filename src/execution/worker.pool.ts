@@ -167,9 +167,18 @@ export class WorkerPool {
     this.resourceMonitor.allocate(job.cpu, job.memoryMB);
 
     try {
-      const result = await runService(job);
+      const result = await runService(job, {
+        onLogChunk: this.onLogChunk
+          ? (chunk) => this.onLogChunk!(job.jobId, chunk)
+          : undefined,
+      });
       serviceRegistry.registerService(
-        { serviceId: result.serviceId, containerId: result.containerId, port: result.hostPort },
+        { 
+          serviceId: result.serviceId, 
+          containerId: result.containerId, 
+          port: result.hostPort,
+          stopLogStream: result.stopLogStream 
+        },
         { cpu: job.cpu, memoryMB: job.memoryMB }
       );
       const url = `http://${result.serviceId}.computebay.online`;
