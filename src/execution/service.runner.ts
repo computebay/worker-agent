@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import { existsSync } from "node:fs";
 import type { ScheduledJob } from "../types/job.types.js";
 import {
   createAndStart,
@@ -8,6 +9,7 @@ import {
   removeContainer,
   getContainerLogs,
   inspectContainerRunning,
+  waitContainer,
 } from "./container.runtime.js";
 import { portManager, isPortFree, waitForPort } from "../network/port.manager.js";
 import { gitClone } from "../libs/git.clone.js";
@@ -68,6 +70,50 @@ export async function runService(job: ScheduledJob): Promise<ServiceStartResult>
     const repoPath = await gitClone(job.repoUrl, job.branch ?? "main", workDirPath);
     mounts.push({ hostPath: repoPath, containerPath: CONTAINER_WORKDIR });
     logger.info({ serviceId: job.jobId, repoPath }, "Repository cloned");
+
+    // Check for standard package managers to run a one-off installation container
+    let installCmd: string | undefined;
+    if (existsSync(path.join(repoPath, "package.json"))) {
+      installCmd = "npm install";
+    } else if (existsSync(path.join(repoPath, "requirements.txt"))) {
+      installCmd = "pip install -r requirements.txt";
+    }
+
+    if (installCmd) {
+      const setupContainerId = `computebay-svc-setup-${job.jobId}`;
+      logger.info({ serviceId: job.jobId, setupContainerId, installCmd }, "Running one-off dependency install container");
+      try {
+        await createAndStart({
+          containerId: setupContainerId,
+          image: job.image,
+          cpu: job.cpu,
+          memoryMb: job.memoryMB,
+          command: ["sh", "-c", installCmd],
+          env: {
+            HOME: CONTAINER_WORKDIR,
+            TMPDIR: "/tmp",
+            TEMP: "/tmp",
+            TMP: "/tmp",
+            PIP_NO_CACHE_DIR: "1",
+            npm_config_cache: "/tmp/.npm",
+            ...(job.env ?? {}),
+          },
+          workDir: CONTAINER_WORKDIR,
+          mounts: [{ hostPath: repoPath, containerPath: CONTAINER_WORKDIR }],
+        });
+
+        const { exitCode } = await waitContainer(setupContainerId);
+        if (exitCode !== 0) {
+          const logs = await getContainerLogs(setupContainerId).catch(() => "(no logs)");
+          throw new Error(`Dependency installation failed (exit ${exitCode}).\nLogs:\n${logs}`);
+        }
+        logger.info({ serviceId: job.jobId }, "Dependency installation completed");
+      } finally {
+        await removeContainer(setupContainerId).catch((err) =>
+          logger.warn({ err, setupContainerId }, "Failed to remove setup container")
+        );
+      }
+    }
   }
 
   // Guard: service jobs must have code to run. Without a bind-mount at /app
@@ -95,7 +141,14 @@ export async function runService(job: ScheduledJob): Promise<ServiceStartResult>
 
   // Build the container command.
   // Prefer explicit entrypoint array; fall back to startCommand shell string.
-  const command = job.entrypoint ?? (job.startCommand ? ["sh", "-c", job.startCommand] : []);
+  let finalStartCommand = job.startCommand;
+  if (finalStartCommand) {
+    // Strip installation hints from startCommand so it's not run twice
+    finalStartCommand = finalStartCommand
+      .replace(/^npm install\s*&&\s*/, "")
+      .replace(/^pip install -r requirements\.txt\s*&&\s*/, "");
+  }
+  const command = job.entrypoint ?? (finalStartCommand ? ["sh", "-c", finalStartCommand] : []);
 
   const cleanup = async (): Promise<void> => {
     try { await killContainer(containerId); } catch { /* may not exist */ }

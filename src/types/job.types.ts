@@ -134,6 +134,8 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
       memoryMB,
       networkEnabled: true, // services always need network
       servicePort: msg.servicePort,
+      repoUrl: msg.repoUrl,
+      branch: msg.branch,
     };
   }
 
