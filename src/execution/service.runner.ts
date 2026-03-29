@@ -59,6 +59,12 @@ export async function runService(job: ScheduledJob): Promise<ServiceStartResult>
     "Starting service container"
   );
 
+  // Run the container as the same user that cloned the code on the host,
+  // preventing permission errors when the container tries to write to the bind mount.
+  const currentUid = process.getuid?.() ?? 1000;
+  const currentGid = process.getgid?.() ?? 1000;
+  const runAsUser = `${currentUid}:${currentGid}`;
+
   // If the scheduler supplied a repoUrl, clone the code onto the host and
   // mount it into /app so the startCommand has something to work with.
   let workDirPath: string | undefined;
@@ -100,6 +106,7 @@ export async function runService(job: ScheduledJob): Promise<ServiceStartResult>
           },
           workDir: CONTAINER_WORKDIR,
           mounts: [{ hostPath: repoPath, containerPath: CONTAINER_WORKDIR }],
+          runAsUser,
         });
 
         const { exitCode } = await waitContainer(setupContainerId);
@@ -172,6 +179,7 @@ export async function runService(job: ScheduledJob): Promise<ServiceStartResult>
       workDir: mounts.length > 0 ? CONTAINER_WORKDIR : undefined,
       mounts,
       portBindings: [{ hostPort, containerPort: job.servicePort }],
+      runAsUser,
     });
 
     // Wait for readiness — NOTE: waitForPort probes the host port, which is
