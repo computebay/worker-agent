@@ -199,10 +199,12 @@ async function main(): Promise<void> {
         throw new Error(`Cannot accept job ${job.jobId}: resources unavailable or draining`);
       }
 
+      // Publish job.started for ALL jobs so the backend transitions status from QUEUED to RUNNING
+      publishNodeEvent("job.started", { jobId: job.jobId });
+
       if (isService) {
         logger.info({ jobId: job.jobId }, "Service job accepted, starting container");
       } else {
-        publishNodeEvent("job.started", { jobId: job.jobId });
         logger.info({ jobId: job.jobId }, "Job started, running container");
       }
 
