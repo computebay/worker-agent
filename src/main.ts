@@ -157,13 +157,22 @@ async function main(): Promise<void> {
   });
 
   logger.info({ nodeId, maxConcurrency }, "Starting job consumer");
+
   const consumerTag = await consume(
     ctx.channel,
     queue,
     maxConcurrency,
     async (payload: unknown) => {
       const msg = payload as ScheduledJobMessage;
-      const isService = (msg.type ?? msg.jobType ?? "").toLowerCase() === "service";
+      const typeStr = (msg.type ?? msg.jobType ?? "").toLowerCase();
+      
+      if (typeStr === "cancel" || typeStr === "cancelled") {
+        logger.info({ jobId: msg.jobId }, "Received job cancellation dispatch from queue");
+        if (msg.jobId) workerPool.cancelJob(msg.jobId);
+        return;
+      }
+
+      const isService = typeStr === "service";
       logger.info({ jobId: msg.jobId, runtime: msg.runtime, type: msg.type ?? "batch" }, "Job received");
 
       // Common required fields for both job types
