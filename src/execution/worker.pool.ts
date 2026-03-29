@@ -1,6 +1,8 @@
 import type { ScheduledJob } from "../types/job.types.js";
 import type { ResourceMonitor } from "../monitoring/resource.monitor.js";
 import { runJob, type LogUploadConfig } from "./job.runner.js";
+import { runService } from "./service.runner.js";
+import { serviceRegistry } from "./service.registry.js";
 import { logger } from "../utils/logger.js";
 
 export type JobResultCallback = (result: {
@@ -15,6 +17,13 @@ export type JobResultCallback = (result: {
 
 export type LogChunkCallback = (jobId: string, chunk: string) => void;
 
+export type ServiceResultCallback = (result: {
+  serviceId: string;
+  hostPort: number;
+  url: string;
+  error?: Error;
+}) => void;
+
 export interface WorkerPoolOptions {
   nodeId: string;
   resourceMonitor: ResourceMonitor;
@@ -25,6 +34,8 @@ export interface WorkerPoolOptions {
   onLogChunk?: LogChunkCallback;
   /** Required for uploading logs to MinIO. */
   logUploadConfig?: LogUploadConfig;
+  /** Called when a service container starts or fails to start. */
+  onServiceResult?: ServiceResultCallback;
 }
 
 /**
@@ -41,6 +52,7 @@ export class WorkerPool {
   private readonly onJobResult: JobResultCallback;
   private readonly onLogChunk: LogChunkCallback | undefined;
   private readonly logUploadConfig: LogUploadConfig | undefined;
+  private readonly onServiceResult: ServiceResultCallback | undefined;
   private activeCount = 0;
   private draining = false;
 
@@ -55,6 +67,14 @@ export class WorkerPool {
     this.onJobResult = options.onJobResult;
     this.onLogChunk = options.onLogChunk;
     this.logUploadConfig = options.logUploadConfig;
+    this.onServiceResult = options.onServiceResult;
+
+    // Wire resource-release callback into the service registry so that
+    // stopService() correctly decrements the ResourceMonitor.
+    serviceRegistry.setReleaseCallback((cpu, memoryMB) => {
+      this.resourceMonitor.release(cpu, memoryMB);
+      this.activeCount--;
+    });
   }
 
   canAccept(job: ScheduledJob): boolean {
@@ -73,6 +93,13 @@ export class WorkerPool {
   }
 
   async run(job: ScheduledJob): Promise<void> {
+    if (job.type === "service") {
+      return this.runService(job);
+    }
+    return this.runBatchJob(job);
+  }
+
+  private async runBatchJob(job: ScheduledJob): Promise<void> {
     if (!this.canAccept(job)) {
       throw new Error(
         `[${this._nodeId}] Cannot accept job ${job.jobId}: draining=${this.draining} ` +
@@ -120,6 +147,49 @@ export class WorkerPool {
     } finally {
       this.activeCount--;
       this.resourceMonitor.release(job.cpu, job.memoryMB);
+    }
+  }
+
+  /**
+   * Runs a long-running service container.
+   * Resources are held until stopService() is called via the registry.
+   * activeCount is decremented by the releaseCallback wired into serviceRegistry.
+   */
+  private async runService(job: ScheduledJob): Promise<void> {
+    if (!this.canAccept(job)) {
+      throw new Error(
+        `[${this._nodeId}] Cannot accept service ${job.jobId}: draining=${this.draining} ` +
+          `active=${this.activeCount}/${this.maxConcurrency} or insufficient resources`
+      );
+    }
+
+    this.activeCount++;
+    this.resourceMonitor.allocate(job.cpu, job.memoryMB);
+
+    try {
+      const result = await runService(job);
+      serviceRegistry.registerService(
+        { serviceId: result.serviceId, containerId: result.containerId, port: result.hostPort },
+        { cpu: job.cpu, memoryMB: job.memoryMB }
+      );
+      const url = `http://${result.serviceId}.computebay.online`;
+      logger.info({ serviceId: result.serviceId, hostPort: result.hostPort, url }, "Service started");
+      this.onServiceResult?.({
+        serviceId: result.serviceId,
+        hostPort: result.hostPort,
+        url,
+      });
+    } catch (err) {
+      // Resources released on failure; service never registered.
+      this.activeCount--;
+      this.resourceMonitor.release(job.cpu, job.memoryMB);
+      logger.error({ err, serviceId: job.jobId }, "Service failed to start");
+      this.onServiceResult?.({
+        serviceId: job.jobId,
+        hostPort: 0,
+        url: "",
+        error: err instanceof Error ? err : new Error(String(err)),
+      });
     }
   }
 

@@ -7,6 +7,7 @@ import { createConnection, closeConnection } from "./messaging/rabbit.connection
 import { consume, cancelConsumer } from "./messaging/rabbit.consumer.js";
 import { publish } from "./messaging/rabbit.publisher.js";
 import { WorkerPool } from "./execution/worker.pool.js";
+import { serviceRegistry } from "./execution/service.registry.js";
 import { gracefulShutdown, installSigTermHandler } from "./lifecycle/shutdown.js";
 import type { ScheduledJobMessage } from "./types/job.types.js";
 import { InvalidJobPayloadError, toScheduledJob } from "./types/job.types.js";
@@ -146,6 +147,13 @@ async function main(): Promise<void> {
         });
       }
     },
+    onServiceResult: ({ serviceId, hostPort, url, error }) => {
+      if (error) {
+        publishNodeEvent("service.failed", { jobId: serviceId, serviceId, error: error.message });
+      } else {
+        publishNodeEvent("service.started", { jobId: serviceId, serviceId, port: hostPort, url });
+      }
+    },
   });
 
   logger.info({ nodeId, maxConcurrency }, "Starting job consumer");
@@ -155,40 +163,51 @@ async function main(): Promise<void> {
     maxConcurrency,
     async (payload: unknown) => {
       const msg = payload as ScheduledJobMessage;
-      logger.info({ jobId: msg.jobId, runtime: msg.runtime }, "Job received");
+      const isService = (msg.type ?? msg.jobType ?? "").toLowerCase() === "service";
+      logger.info({ jobId: msg.jobId, runtime: msg.runtime, type: msg.type ?? "batch" }, "Job received");
+
+      // Common required fields for both job types
       if (
         !msg.jobId ||
         !msg.jobType ||
         !msg.runtime ||
-        !msg.repoUrl ||
-        typeof msg.repoUrl !== "string" ||
-        !msg.startCommand ||
-        typeof msg.startCommand !== "string" ||
         !msg.resources ||
         typeof msg.resources !== "object" ||
         !msg.orgId
       ) {
         logger.warn(
           { payload },
-          "Invalid job payload: must match CreateJobInput (jobId, jobType, runtime, repoUrl, startCommand, resources, orgId). Discarding (no requeue)."
+          "Invalid job payload: missing jobId, jobType, runtime, resources, or orgId. Discarding."
         );
-        throw new InvalidJobPayloadError("Payload missing required CreateJobInput fields", payload);
+        throw new InvalidJobPayloadError("Payload missing required fields", payload);
+      }
+
+      // Batch-only required fields
+      if (!isService && (!msg.repoUrl || typeof msg.repoUrl !== "string")) {
+        logger.warn({ payload }, "Batch job missing repoUrl. Discarding.");
+        throw new InvalidJobPayloadError("repoUrl is required for batch jobs", payload);
+      }
+      if (!isService && (!msg.startCommand || typeof msg.startCommand !== "string")) {
+        logger.warn({ payload }, "Batch job missing startCommand. Discarding.");
+        throw new InvalidJobPayloadError("startCommand is required for batch jobs", payload);
       }
 
       const job = toScheduledJob(msg);
 
       if (!workerPool.canAccept(job)) {
         logger.warn({ jobId: job.jobId }, "Rejecting job: insufficient resources or draining");
-        throw new Error(
-          `Cannot accept job ${job.jobId}: resources unavailable or draining`
-        );
+        throw new Error(`Cannot accept job ${job.jobId}: resources unavailable or draining`);
       }
 
-      publishNodeEvent("job.started", { jobId: job.jobId });
-      logger.info({ jobId: job.jobId }, "Job started, running container");
+      if (isService) {
+        logger.info({ jobId: job.jobId }, "Service job accepted, starting container");
+      } else {
+        publishNodeEvent("job.started", { jobId: job.jobId });
+        logger.info({ jobId: job.jobId }, "Job started, running container");
+      }
 
       await workerPool.run(job);
-      logger.info({ jobId: job.jobId }, "Job finished");
+      logger.info({ jobId: job.jobId, type: job.type }, "Job/service dispatched");
     }
   );
 
@@ -204,6 +223,7 @@ async function main(): Promise<void> {
   }, config.HEARTBEAT_INTERVAL_MS);
 
   let shutdownStarted = false;
+  const stopServicesOnShutdown = process.env.STOP_SERVICES_ON_SHUTDOWN === "true";
 
   installSigTermHandler(() => {
     if (shutdownStarted) return;
@@ -217,6 +237,25 @@ async function main(): Promise<void> {
       },
       drainWaiter: () => workerPool.hasActiveJobs(),
       steps: [
+        async () => {
+          if (stopServicesOnShutdown) {
+            const running = serviceRegistry.listServices().filter((s) => s.status === "running");
+            logger.info({ count: running.length }, "Stopping running services on shutdown");
+            await Promise.allSettled(
+              running.map((s) =>
+                serviceRegistry.stopService(s.serviceId).then(() => {
+                  publishNodeEvent("service.stopped", {
+                    serviceId: s.serviceId,
+                    port: s.port,
+                    url: `http://${s.serviceId}.computebay.online`,
+                  });
+                }).catch((err) => {
+                  logger.warn({ err, serviceId: s.serviceId }, "Failed to stop service on shutdown");
+                })
+              )
+            );
+          }
+        },
         async () => {
           const { availableCpu, availableMemoryMb } = resourceMonitor.getAvailable();
           await sendHeartbeat(config.SCHEDULER_BASE_URL, {

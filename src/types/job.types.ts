@@ -9,22 +9,30 @@ export class InvalidJobPayloadError extends Error {
   }
 }
 
+export type JobType = "batch" | "service";
+
 /**
  * Job payload shape from Job Service (same as CreateJobInput).
  * Sent to worker via job.scheduled.{nodeId} with jobId added by Scheduler.
  */
 export interface CreateJobInput {
   jobType: string;
+  /** Discriminates batch vs. service execution. Default: "batch". */
+  type?: JobType;
   runtime: string;
-  /** Git repo URL to clone. */
-  repoUrl: string;
+  /** Git repo URL to clone. Required for batch jobs. */
+  repoUrl?: string;
   /** Git branch to checkout (default: main). */
   branch?: string;
   /** Shell command to run inside /workspace (e.g. "npm install && npm run build"). */
-  startCommand: string;
+  startCommand?: string;
+  /** Command passed directly to the container entrypoint (service jobs). */
+  entrypoint?: string[];
   resources: Record<string, unknown>;
   /** Optional: enable network for scraping jobs. Default false. */
   networkEnabled?: boolean;
+  /** Container-internal port to expose (required for service jobs). */
+  servicePort?: number;
   retryPolicy?: Record<string, unknown> | null;
   priority?: number;
   orgId: string;
@@ -36,12 +44,20 @@ export interface CreateJobInput {
 export interface ScheduledJobMessage {
   jobId: string;
   jobType: string;
+  /** Discriminates batch vs. service execution. Default: "batch". */
+  type?: JobType;
   runtime: string;
-  repoUrl: string;
+  /** Required for batch jobs; optional for service jobs. */
+  repoUrl?: string;
   branch?: string;
-  startCommand: string;
+  /** Required for batch jobs; optional for service jobs. */
+  startCommand?: string;
+  /** Command passed directly to the container entrypoint (service jobs). */
+  entrypoint?: string[];
   resources: Record<string, unknown>;
   networkEnabled?: boolean;
+  /** Container-internal port to expose (required for service jobs). */
+  servicePort?: number;
   retryPolicy?: Record<string, unknown> | null;
   priority?: number;
   orgId: string;
@@ -49,29 +65,40 @@ export interface ScheduledJobMessage {
 
 /**
  * Internal job shape used for container execution (derived from ScheduledJobMessage).
- * Git-based: clone repo, mount as /workspace, run startCommand via sh -c.
+ * Batch: clone repo, mount as /workspace, run startCommand via sh -c.
+ * Service: run image directly with optional entrypoint, expose servicePort.
  */
 export interface ScheduledJob {
   jobId: string;
+  /** Discriminates batch vs. service execution. */
+  type: JobType;
   image: string;
-  /** Shell command to run (e.g. "npm install && npm run build"). */
-  startCommand: string;
+  /** Shell command to run (batch jobs). */
+  startCommand?: string;
+  /** Direct container entrypoint (service jobs). */
+  entrypoint?: string[];
   cpu: number;
   memoryMB: number;
   timeoutMs?: number;
   env?: Record<string, string>;
-  /** Git repo URL. */
-  repoUrl: string;
+  /** Git repo URL. Required for batch jobs. */
+  repoUrl?: string;
   /** Git branch (default: main). */
-  branch: string;
+  branch?: string;
   /** Enable network in container (e.g. for scraping). Default false. */
   networkEnabled: boolean;
+  /** Container-internal port (required for service jobs). */
+  servicePort?: number;
 }
 
 /**
  * Maps Job Service payload to internal ScheduledJob.
  */
 export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
+  // Normalize: check `type` first, fall back to `jobType`, ignore case.
+  const rawType = (msg.type ?? msg.jobType ?? "").toLowerCase();
+  const jobType: JobType = rawType === "service" ? "service" : "batch";
+
   const cpu = msg.resources?.cpu;
   const memoryMB = msg.resources?.memoryMB ?? msg.resources?.memoryMb;
   if (typeof cpu !== "number" || cpu <= 0) {
@@ -89,15 +116,38 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
   if (!msg.runtime || typeof msg.runtime !== "string") {
     throw new InvalidJobPayloadError("runtime (Docker image) is required", msg);
   }
+
+  if (jobType === "service") {
+    if (!msg.servicePort || typeof msg.servicePort !== "number" || msg.servicePort <= 0) {
+      throw new InvalidJobPayloadError(
+        "servicePort must be a positive number for service jobs",
+        msg
+      );
+    }
+    return {
+      jobId: msg.jobId,
+      type: "service",
+      image: msg.runtime,
+      entrypoint: msg.entrypoint,
+      startCommand: msg.startCommand,
+      cpu,
+      memoryMB,
+      networkEnabled: true, // services always need network
+      servicePort: msg.servicePort,
+    };
+  }
+
+  // Batch job — existing validation
   if (!msg.repoUrl || typeof msg.repoUrl !== "string") {
-    throw new InvalidJobPayloadError("repoUrl is required", msg);
+    throw new InvalidJobPayloadError("repoUrl is required for batch jobs", msg);
   }
   if (!msg.startCommand || typeof msg.startCommand !== "string") {
-    throw new InvalidJobPayloadError("startCommand is required", msg);
+    throw new InvalidJobPayloadError("startCommand is required for batch jobs", msg);
   }
 
   return {
     jobId: msg.jobId,
+    type: "batch",
     image: msg.runtime,
     startCommand: msg.startCommand,
     cpu,
@@ -162,4 +212,29 @@ export interface JobFailedEvent extends JobLifecycleEvent {
 
 export interface JobTimeoutEvent extends JobLifecycleEvent {
   event: "job.timeout";
+}
+
+/**
+ * Service lifecycle events
+ */
+export interface ServiceLifecycleEvent {
+  serviceId: string;
+  nodeId: string;
+  timestamp: string;
+}
+
+export interface ServiceStartedEvent extends ServiceLifecycleEvent {
+  event: "service.started";
+  port: number;
+  url: string;
+}
+
+export interface ServiceFailedEvent extends ServiceLifecycleEvent {
+  event: "service.failed";
+  error: string;
+}
+
+export interface ServiceStoppedEvent extends ServiceLifecycleEvent {
+  event: "service.stopped";
+  port: number;
 }

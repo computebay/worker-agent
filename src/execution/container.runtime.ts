@@ -21,6 +21,8 @@ export interface ContainerCreateOptions {
   networkEnabled?: boolean;
   /** Run container as this UID:GID (e.g. "1000:1000") to match host file ownership. */
   runAsUser?: string;
+  /** Port bindings for service containers: { hostPort, containerPort }[]. */
+  portBindings?: Array<{ hostPort: number; containerPort: number }>;
 }
 
 export interface ContainerResult {
@@ -45,7 +47,26 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     mounts = [],
     // networkEnabled = false,
     runAsUser,
+    portBindings = [],
   } = options;
+
+  // Service containers (those with port bindings) run user code that typically
+  // needs to write to its working directory (e.g. npm install -> node_modules/).
+  // --read-only would cause those writes to fail and the container to exit immediately.
+  // For services we skip --read-only and instead add a writable tmpfs at /app so
+  // runtime deps can be installed without touching the host filesystem.
+  const isService = portBindings.length > 0;
+
+  if (portBindings.length > 0) {
+    for (const pb of portBindings) {
+      if (pb.containerPort < 1 || pb.containerPort > 65535) {
+        throw new Error(`Invalid container port: ${pb.containerPort}`);
+      }
+      if (pb.hostPort < 1 || pb.hostPort > 65535) {
+        throw new Error(`Invalid host port: ${pb.hostPort}`);
+      }
+    }
+  }
 
   const args = [
     "run",
@@ -64,7 +85,9 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     "8.8.4.4",
     "--pids-limit",
     "64",
-    "--read-only",
+    // Batch jobs use --read-only for maximum isolation. Service containers skip it
+    // because npm install / pip install / etc. need a writable working directory.
+    ...(isService ? [] : ["--read-only"]),
     "--tmpfs",
     "/tmp:rw,noexec,nosuid,size=128m",
     "--tmpfs",
@@ -74,6 +97,7 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     "--security-opt",
     "no-new-privileges",
     ...(runAsUser ? ["--user", runAsUser] : []),
+    ...portBindings.flatMap(({ hostPort, containerPort }) => ["-p", `${hostPort}:${containerPort}`]),
     ...Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
     ...mounts.flatMap((m) => [
       "--mount",
@@ -110,6 +134,36 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
       logger.error({ containerId, err }, "Docker spawn error");
       reject(err);
     });
+  });
+}
+
+/**
+ * Returns true if the container exists and is currently running.
+ * Used to detect docker-proxy false-positives during service startup:
+ * docker-proxy binds the host port immediately, so a TCP probe succeeds
+ * even if the app inside has already exited.
+ */
+export function inspectContainerRunning(containerId: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const proc = spawn(
+      "docker",
+      ["inspect", "--format", "{{.State.Running}}", containerId],
+      { stdio: ["ignore", "pipe", "pipe"] }
+    );
+
+    let stdout = "";
+    proc.stdout?.on("data", (chunk) => { stdout += chunk.toString(); });
+
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        // Non-zero exit means container doesn't exist (already removed).
+        resolve(false);
+      } else {
+        resolve(stdout.trim() === "true");
+      }
+    });
+
+    proc.on("error", () => resolve(false));
   });
 }
 

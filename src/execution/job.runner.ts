@@ -60,6 +60,12 @@ export async function runJob(
   const currentGid = process.getgid?.() ?? 1000;
   const runAsUser = `${currentUid}:${currentGid}`;
 
+  if (!job.repoUrl) throw new Error(`[${job.jobId}] repoUrl is required for batch jobs`);
+  if (!job.startCommand) throw new Error(`[${job.jobId}] startCommand is required for batch jobs`);
+
+  const repoUrl = job.repoUrl;
+  const startCommand = job.startCommand;
+
   // Create temp working directory
   const workDirPath = await mkdtemp(path.join(os.tmpdir(), `computebay-${job.jobId}-`));
   const logFilePath = path.join(workDirPath, "full.log");
@@ -69,22 +75,22 @@ export async function runJob(
   try {
     // Git clone
     logger.info(
-      { jobId: job.jobId, repoUrl: job.repoUrl, branch: job.branch },
+      { jobId: job.jobId, repoUrl, branch: job.branch },
       "Cloning repository"
     );
-    const repoPath = await gitClone(job.repoUrl, job.branch, workDirPath);
+    const repoPath = await gitClone(repoUrl, job.branch ?? "main", workDirPath);
 
     const mounts: ContainerMount[] = [
       { hostPath: repoPath, containerPath: CONTAINER_WORKSPACE },
     ];
-    const command = ["sh", "-c", job.startCommand];
+    const command = ["sh", "-c", startCommand];
 
     logger.info(
       {
         jobId: job.jobId,
         containerId,
         image: job.image,
-        startCommand: job.startCommand,
+        startCommand,
         runAsUser,
       },
       "Starting job container"
