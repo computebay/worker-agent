@@ -15,14 +15,26 @@ export interface ContainerCreateOptions {
   env?: Record<string, string>;
   /** Working directory inside the container (e.g. /workspace). */
   workDir?: string;
-  /** Bind mounts: host path → container path (e.g. extracted artifact dir → /workspace). */
+  /** Bind mounts: host path → container path. */
   mounts?: ContainerMount[];
-  /** Enable network (default: false, uses --network none). Set true for scraping jobs. */
+  /** Enable network (default: true, uses bridge). */
   networkEnabled?: boolean;
   /** Run container as this UID:GID (e.g. "1000:1000") to match host file ownership. */
   runAsUser?: string;
   /** Port bindings for service containers: { hostPort, containerPort }[]. */
   portBindings?: Array<{ hostPort: number; containerPort: number }>;
+  /**
+   * Mount the container root filesystem as read-only.
+   * Default: true for batch/build containers, false for runtime service containers.
+   * Set explicitly — do NOT rely on port binding presence to infer this.
+   */
+  readOnly?: boolean;
+  /**
+   * Size of the /tmp tmpfs in MB.
+   * Default: 128. Build/install containers should pass a larger value (e.g. 512)
+   * because npm/pip write package tarballs and cache files to /tmp during install.
+   */
+  tmpSizeMb?: number;
 }
 
 export interface ContainerResult {
@@ -45,17 +57,14 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     env = {},
     workDir,
     mounts = [],
-    // networkEnabled = false,
     runAsUser,
     portBindings = [],
+    // readOnly defaults to true (safe for batch + build containers).
+    // Runtime service containers pass readOnly: false explicitly.
+    readOnly = true,
+    // 128 MB is enough for batch jobs; build/install containers pass 512.
+    tmpSizeMb = 128,
   } = options;
-
-  // Service containers (those with port bindings) run user code that typically
-  // needs to write to its working directory (e.g. npm install -> node_modules/).
-  // --read-only would cause those writes to fail and the container to exit immediately.
-  // For services we skip --read-only and instead add a writable tmpfs at /app so
-  // runtime deps can be installed without touching the host filesystem.
-  const isService = portBindings.length > 0;
 
   if (portBindings.length > 0) {
     for (const pb of portBindings) {
@@ -78,20 +87,20 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     "--memory",
     `${memoryMb}m`,
     "--network",
-    "bridge",  // always bridge, DNS won't work with "none" anyway
+    "bridge",
     "--dns",
     "8.8.8.8",
     "--dns",
     "8.8.4.4",
     "--pids-limit",
     "64",
-    // Batch jobs use --read-only for maximum isolation. Service containers skip it
-    // because npm install / pip install / etc. need a writable working directory.
-    ...(isService ? [] : ["--read-only"]),
-    "--tmpfs",
-    "/tmp:rw,noexec,nosuid,size=128m",
-    "--tmpfs",
-    "/var/tmp:rw,noexec,nosuid,size=64m",
+    ...(readOnly ? [
+      "--read-only",
+      "--tmpfs",
+      `/tmp:rw,noexec,nosuid,size=${tmpSizeMb}m`,
+      "--tmpfs",
+      "/var/tmp:rw,noexec,nosuid,size=64m",
+    ] : []),
     "--cap-drop",
     "ALL",
     "--security-opt",

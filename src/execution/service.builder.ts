@@ -91,12 +91,17 @@ export async function buildServiceArtifact(
         containerId: id,
         image: job.image,
         cpu: job.cpu,
-        memoryMb: job.memoryMB,
+        // Build tools often need more RAM than the runtime app itself.
+        memoryMb: Math.max(job.memoryMB, 1024),
         command: ["sh", "-c", preset.installCommand],
         env: baseEnv,
         workDir: CONTAINER_WORKDIR,
         mounts: [mount],
         runAsUser,
+        // Install writes node_modules into the bind-mounted /app on the host
+        // and needs /tmp for package tarballs — both require a writable fs.
+        readOnly: false,
+        tmpSizeMb: 512,
       });
 
       const stopStream = streamContainerLogs(id, {
@@ -128,12 +133,16 @@ export async function buildServiceArtifact(
         containerId: id,
         image: job.image,
         cpu: job.cpu,
-        memoryMb: job.memoryMB,
+        // Build tools often need more RAM than the runtime app itself.
+        memoryMb: Math.max(job.memoryMB, 1024),
         command: ["sh", "-c", preset.buildCommand],
         env: { ...baseEnv, NODE_ENV: "production" },
         workDir: CONTAINER_WORKDIR,
         mounts: [mount],
         runAsUser,
+        // Build writes compiled output (dist/, .next/, etc.) into bind-mounted /app.
+        readOnly: false,
+        tmpSizeMb: 512,
       });
 
       const stopStream = streamContainerLogs(id, {

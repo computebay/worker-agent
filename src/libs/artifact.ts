@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream, statSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import type { Readable } from "node:stream";
-import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { GetObjectCommand } from "@aws-sdk/client-s3";
+import { Upload } from "@aws-sdk/lib-storage";
 import type { S3Config } from "./s3.js";
 import { getS3Client } from "./s3.js";
 import { logger } from "../utils/logger.js";
@@ -76,21 +77,33 @@ export async function computeFileChecksum(filePath: string): Promise<string> {
   });
 }
 
-/** Upload a local file to MinIO at the given key. */
+/** Upload a local file to MinIO at the given key using multipart upload. */
 export async function uploadArtifact(
   s3Config: S3Config,
   key: string,
   tarPath: string
 ): Promise<void> {
   const s3 = getS3Client(s3Config);
-  await s3.send(
-    new PutObjectCommand({
+  const fileSize = statSync(tarPath).size;
+
+  const upload = new Upload({
+    client: s3,
+    params: {
       Bucket: s3Config.bucket,
       Key: key,
       Body: createReadStream(tarPath),
-    })
-  );
-  logger.info({ key }, "Artifact uploaded to MinIO");
+      ContentLength: fileSize,
+    },
+    queueSize: 4,
+    partSize: 10 * 1024 * 1024, // 10MB per part
+  });
+
+  upload.on("httpUploadProgress", (progress) => {
+    logger.info({ key, ...progress }, "Artifact upload progress");
+  });
+
+  await upload.done();
+  logger.info({ key, fileSize }, "Artifact uploaded to MinIO");
 }
 
 /** Download an artifact from MinIO and write it to destPath. */

@@ -171,7 +171,8 @@ export async function runService(
           containerId: installId,
           image: job.image,
           cpu: job.cpu,
-          memoryMb: job.memoryMB,
+          // Install tools often need more RAM than the runtime app itself
+          memoryMb: Math.max(job.memoryMB, 1024),
           command: ["sh", "-c", preset.installCommand],
           env: {
             HOME: CONTAINER_WORKDIR,
@@ -184,6 +185,8 @@ export async function runService(
           workDir: CONTAINER_WORKDIR,
           mounts: [{ hostPath: repoPath, containerPath: CONTAINER_WORKDIR }],
           runAsUser,
+          // Needs writable access to root (to write into the bind-mounted /app)
+          readOnly: false,
         });
 
         let stopStream: (() => void) | undefined;
@@ -262,6 +265,9 @@ export async function runService(
       mounts: [{ hostPath: workDirPath, containerPath: CONTAINER_WORKDIR }],
       portBindings: [{ hostPort, containerPort: job.servicePort }],
       runAsUser,
+      // Runtime service container must be writable: the app writes logs, sockets,
+      // pid files, etc. inside its working directory at runtime.
+      readOnly: false,
     });
 
     if (onLogChunk) {
