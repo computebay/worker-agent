@@ -33,6 +33,13 @@ export interface CreateJobInput {
   networkEnabled?: boolean;
   /** Container-internal port to expose (required for service jobs). */
   servicePort?: number;
+  /**
+   * Override the auto-detected build command (e.g. "npm run build").
+   * When provided, the worker always treats this as a build-step service.
+   */
+  buildCommand?: string;
+  /** Override the auto-detected runtime start command (e.g. "node dist/index.js"). */
+  runtimeCommand?: string;
   retryPolicy?: Record<string, unknown> | null;
   priority?: number;
   orgId: string;
@@ -58,6 +65,10 @@ export interface ScheduledJobMessage {
   networkEnabled?: boolean;
   /** Container-internal port to expose (required for service jobs). */
   servicePort?: number;
+  /** Override auto-detected build command. */
+  buildCommand?: string;
+  /** Override auto-detected runtime start command. */
+  runtimeCommand?: string;
   retryPolicy?: Record<string, unknown> | null;
   priority?: number;
   orgId: string;
@@ -89,6 +100,10 @@ export interface ScheduledJob {
   networkEnabled: boolean;
   /** Container-internal port (required for service jobs). */
   servicePort?: number;
+  /** User-supplied override for the build command (beats framework auto-detection). */
+  buildCommand?: string;
+  /** User-supplied override for the runtime start command (beats auto-detection). */
+  runtimeCommand?: string;
 }
 
 /**
@@ -136,6 +151,8 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
       servicePort: msg.servicePort,
       repoUrl: msg.repoUrl,
       branch: msg.branch,
+      buildCommand: msg.buildCommand,
+      runtimeCommand: msg.runtimeCommand,
     };
   }
 
@@ -223,6 +240,25 @@ export interface ServiceLifecycleEvent {
   serviceId: string;
   nodeId: string;
   timestamp: string;
+}
+
+export interface ServiceBuildingEvent extends ServiceLifecycleEvent {
+  event: "service.building";
+  repoUrl?: string;
+  /** Auto-detected or user-supplied framework name, e.g. "nextjs" | "vite" | "node-build". */
+  framework?: string;
+}
+
+export interface ServiceBuiltEvent extends ServiceLifecycleEvent {
+  event: "service.built";
+  artifactKey: string;
+  checksum: string;
+  buildDurationMs: number;
+}
+
+export interface ServiceStartingEvent extends ServiceLifecycleEvent {
+  event: "service.starting";
+  artifactKey: string;
 }
 
 export interface ServiceStartedEvent extends ServiceLifecycleEvent {

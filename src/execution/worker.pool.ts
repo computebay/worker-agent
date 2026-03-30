@@ -29,13 +29,18 @@ export interface WorkerPoolOptions {
   resourceMonitor: ResourceMonitor;
   maxConcurrency: number;
   jobTimeoutMs: number;
+  buildTimeoutMs: number;
   onJobResult: JobResultCallback;
   /** Called with log chunks for streaming to RabbitMQ. */
   onLogChunk?: LogChunkCallback;
-  /** Required for uploading logs to MinIO. */
+  /** Required for uploading artifacts to MinIO (build-step service jobs). */
   logUploadConfig?: LogUploadConfig;
   /** Called when a service container starts or fails to start. */
   onServiceResult?: ServiceResultCallback;
+  /** Called when the build pipeline begins (before install/build containers). */
+  onServiceBuilding?: (serviceId: string, framework: string | undefined) => void;
+  /** Called when the artifact has been uploaded to MinIO. */
+  onServiceBuilt?: (serviceId: string, artifactKey: string, checksum: string, buildDurationMs: number) => void;
 }
 
 /**
@@ -49,10 +54,13 @@ export class WorkerPool {
   private readonly resourceMonitor: ResourceMonitor;
   private readonly maxConcurrency: number;
   private readonly jobTimeoutMs: number;
+  private readonly buildTimeoutMs: number;
   private readonly onJobResult: JobResultCallback;
   private readonly onLogChunk: LogChunkCallback | undefined;
   private readonly logUploadConfig: LogUploadConfig | undefined;
   private readonly onServiceResult: ServiceResultCallback | undefined;
+  private readonly onServiceBuilding: WorkerPoolOptions["onServiceBuilding"];
+  private readonly onServiceBuilt: WorkerPoolOptions["onServiceBuilt"];
   private activeCount = 0;
   private draining = false;
 
@@ -64,10 +72,13 @@ export class WorkerPool {
     this.resourceMonitor = options.resourceMonitor;
     this.maxConcurrency = options.maxConcurrency;
     this.jobTimeoutMs = options.jobTimeoutMs;
+    this.buildTimeoutMs = options.buildTimeoutMs;
     this.onJobResult = options.onJobResult;
     this.onLogChunk = options.onLogChunk;
     this.logUploadConfig = options.logUploadConfig;
     this.onServiceResult = options.onServiceResult;
+    this.onServiceBuilding = options.onServiceBuilding;
+    this.onServiceBuilt = options.onServiceBuilt;
 
     // Wire resource-release callback into the service registry so that
     // stopService() correctly decrements the ResourceMonitor.
@@ -176,14 +187,29 @@ export class WorkerPool {
         onLogChunk: this.onLogChunk
           ? (chunk) => this.onLogChunk!(job.jobId, chunk)
           : undefined,
+        onServiceBuilding: (framework) => {
+          this.onServiceBuilding?.(job.jobId, framework);
+        },
+        onServiceBuilt: (buildResult) => {
+          this.onServiceBuilt?.(
+            job.jobId,
+            buildResult.artifactKey,
+            buildResult.checksum,
+            buildResult.buildDurationMs
+          );
+        },
+        s3Config: this.logUploadConfig?.s3Config,
+        buildTimeoutMs: this.buildTimeoutMs,
       });
       serviceRegistry.registerService(
         {
-          serviceId: result.serviceId, 
-          containerId: result.containerId, 
+          serviceId: result.serviceId,
+          containerId: result.containerId,
           port: result.hostPort,
           stopLogStream: result.stopLogStream,
-          workDirPath: result.workDirPath
+          workDirPath: result.workDirPath,
+          artifactKey: result.artifactKey,
+          framework: result.framework,
         },
         { cpu: job.cpu, memoryMB: job.memoryMB }
       );

@@ -123,6 +123,7 @@ async function main(): Promise<void> {
     resourceMonitor,
     maxConcurrency,
     jobTimeoutMs: config.JOB_TIMEOUT_MS,
+    buildTimeoutMs: config.BUILD_TIMEOUT_MS,
     logUploadConfig,
     onLogChunk: (jobId, chunk) => {
       publishNodeEvent("job.log.chunk", { jobId, chunk });
@@ -146,6 +147,12 @@ async function main(): Promise<void> {
           output: output ?? "",
         });
       }
+    },
+    onServiceBuilding: (serviceId, framework) => {
+      publishNodeEvent("service.building", { jobId: serviceId, serviceId, framework });
+    },
+    onServiceBuilt: (serviceId, artifactKey, checksum, buildDurationMs) => {
+      publishNodeEvent("service.built", { jobId: serviceId, serviceId, artifactKey, checksum, buildDurationMs });
     },
     onServiceResult: ({ serviceId, hostPort, url, error }) => {
       if (error) {

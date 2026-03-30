@@ -10,6 +10,8 @@ const configSchema = z.object({
   HEARTBEAT_INTERVAL_MS: z.coerce.number().positive().default(10000),
   MAX_CONCURRENCY: z.coerce.number().int().positive().optional(),
   JOB_TIMEOUT_MS: z.coerce.number().positive().default(3600000),
+  /** Hard timeout for each build container phase (install + build). Default: 10 min. */
+  BUILD_TIMEOUT_MS: z.coerce.number().positive().default(600000),
   AGENT_VERSION: z.string().min(1).optional(),
   // MinIO / S3 for artifact download (required when jobs use inputArtifacts.objectKey)
   MINIO_ENDPOINT: z.string().min(1).optional(),

@@ -12,6 +12,10 @@ export interface ServiceEntry {
   status: ServiceStatus;
   stopLogStream?: () => void;
   workDirPath?: string;
+  /** MinIO artifact key (build-step services only). */
+  artifactKey?: string;
+  /** Auto-detected framework name (e.g. "nextjs", "vite", "node-build"). */
+  framework?: string;
 }
 
 type ReleaseCallback = (cpu: number, memoryMB: number) => void;
