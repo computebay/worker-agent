@@ -104,6 +104,10 @@ async function main(): Promise<void> {
     });
   }
 
+  if (config.RABBITMQ_URL) {
+    rabbitmqUrl = config.RABBITMQ_URL;
+  }
+
   logger.info({ nodeId, rabbitmqUrl, queue, publishExchange }, "Connecting to RabbitMQ");
   const ctx = await createConnection(rabbitmqUrl, publishExchange);
   logger.info("RabbitMQ connected");

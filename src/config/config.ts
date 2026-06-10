@@ -5,6 +5,7 @@ dotenv.config();
 
 const configSchema = z.object({
   SCHEDULER_BASE_URL: z.string().url().min(1),
+  RABBITMQ_URL: z.string().min(1).optional(),
   CPU_LIMIT: z.coerce.number().positive().optional(),
   MEMORY_LIMIT_MB: z.coerce.number().positive().optional(),
   HEARTBEAT_INTERVAL_MS: z.coerce.number().positive().default(10000),
