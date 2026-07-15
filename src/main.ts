@@ -131,23 +131,26 @@ async function main(): Promise<void> {
     onLogChunk: (jobId, chunk) => {
       publishNodeEvent("job.log.chunk", { jobId, chunk });
     },
-    onJobResult: ({ jobId, exitCode, timedOut, output, logObjectKey, error }) => {
+    onJobResult: ({ jobId, exitCode, timedOut, output, logObjectKey, artifacts, error }) => {
       if (timedOut) {
-        publishNodeEvent("job.timeout", { jobId, output: output ?? "" });
+        publishNodeEvent("job.timeout", { jobId, output: output ?? "", ...(logObjectKey != null ? { logObjectKey } : {}) });
       } else if (error) {
-        publishNodeEvent("job.failed", { jobId, error: error.message, output: output ?? "" });
+        publishNodeEvent("job.failed", { jobId, error: error.message, output: output ?? "", ...(logObjectKey != null ? { logObjectKey } : {}), ...(artifacts?.length ? { artifacts } : {}) });
       } else if (exitCode === 0) {
         publishNodeEvent("job.completed", {
           jobId,
           exitCode,
           output: output ?? "",
           ...(logObjectKey != null ? { logObjectKey } : {}),
+          ...(artifacts?.length ? { artifacts } : {}),
         });
       } else {
         publishNodeEvent("job.failed", {
           jobId,
           error: `Exit code ${exitCode}`,
           output: output ?? "",
+          ...(logObjectKey != null ? { logObjectKey } : {}),
+          ...(artifacts?.length ? { artifacts } : {}),
         });
       }
     },

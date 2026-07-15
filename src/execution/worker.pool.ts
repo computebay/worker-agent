@@ -12,6 +12,8 @@ export type JobResultCallback = (result: {
   output: string;
   /** MinIO object key for full log: logs/<jobId>/full.log */
   logObjectKey?: string;
+  /** Output artifacts collected from /workspace/outputs */
+  artifacts?: import("../types/job.types.js").JobArtifact[];
   error?: Error;
 }) => void;
 
@@ -138,6 +140,7 @@ export class WorkerPool {
         timedOut: result.timedOut,
         output: result.output,
         logObjectKey: result.logObjectKey,
+        artifacts: result.artifacts,
       });
     } catch (err) {
       this.cancelControllers.delete(job.jobId);

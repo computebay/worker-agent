@@ -156,7 +156,7 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
     memoryMB,
     repoUrl: msg.repoUrl,
     branch: msg.branch ?? "main",
-    networkEnabled: Boolean(msg.networkEnabled),
+    networkEnabled: msg.networkEnabled !== false,
   };
 }
 
@@ -205,15 +205,35 @@ export interface JobCompletedEvent extends JobLifecycleEvent {
   exitCode: number;
   /** MinIO object key for full log: logs/<jobId>/full.log */
   logObjectKey?: string;
+  /** Output artifacts collected from /workspace/outputs */
+  artifacts?: JobArtifact[];
 }
 
 export interface JobFailedEvent extends JobLifecycleEvent {
   event: "job.failed";
   error: string;
+  /** MinIO object key for full log: logs/<jobId>/full.log */
+  logObjectKey?: string;
+  /** Output artifacts collected from /workspace/outputs (if any were produced before failure) */
+  artifacts?: JobArtifact[];
 }
 
 export interface JobTimeoutEvent extends JobLifecycleEvent {
   event: "job.timeout";
+  /** MinIO object key for full log: logs/<jobId>/full.log */
+  logObjectKey?: string;
+}
+
+/**
+ * Artifact metadata for files uploaded to MinIO
+ */
+export interface JobArtifact {
+  name: string;
+  key: string;
+  sizeBytes: number;
+  contentType?: string;
+  kind: "output" | "log" | "manifest";
+  createdAt: string;
 }
 
 /**

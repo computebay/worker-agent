@@ -13,6 +13,7 @@ import {
 } from "./container.runtime.js";
 import { gitClone } from "../libs/git.clone.js";
 import { uploadLogFile } from "../libs/log.upload.js";
+import { collectAndUploadArtifacts } from "../libs/artifact.upload.js";
 import type { S3Config } from "../libs/s3.js";
 import { logger } from "../utils/logger.js";
 
@@ -22,6 +23,8 @@ export interface JobRunResult {
   output: string;
   /** MinIO object key for full log: logs/<jobId>/full.log */
   logObjectKey?: string;
+  /** Output artifacts collected from /workspace/outputs */
+  artifacts?: import("../types/job.types.js").JobArtifact[];
 }
 
 /** Required for log upload to MinIO. */
@@ -224,7 +227,31 @@ export async function runJob(
       }
     }
 
-    return { exitCode, timedOut, output, logObjectKey };
+    // Collect and upload output artifacts from /workspace/outputs
+    let artifacts: import("../types/job.types.js").JobArtifact[] | undefined;
+    if (logUploadConfig) {
+      const outputsDir = path.join(repoPath, "outputs");
+      try {
+        artifacts = await collectAndUploadArtifacts(
+          logUploadConfig.s3Config,
+          job.jobId,
+          outputsDir
+        );
+        if (artifacts.length > 0) {
+          logger.info(
+            { jobId: job.jobId, artifactCount: artifacts.length },
+            "Uploaded output artifacts to MinIO"
+          );
+        }
+      } catch (artifactErr) {
+        logger.warn(
+          { err: artifactErr, jobId: job.jobId },
+          "Failed to collect/upload artifacts"
+        );
+      }
+    }
+
+    return { exitCode, timedOut, output, logObjectKey, artifacts };
   } finally {
     try {
       await rm(workDirPath, { recursive: true, force: true });

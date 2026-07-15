@@ -45,7 +45,7 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     env = {},
     workDir,
     mounts = [],
-    // networkEnabled = false,
+    networkEnabled = false,
     runAsUser,
     portBindings = [],
   } = options;
@@ -55,7 +55,7 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
   // --read-only would cause those writes to fail and the container to exit immediately.
   // For services we skip --read-only and instead add a writable tmpfs at /app so
   // runtime deps can be installed without touching the host filesystem.
-  const isService = portBindings.length > 0;
+  // const isService = portBindings.length > 0;
 
   if (portBindings.length > 0) {
     for (const pb of portBindings) {
@@ -78,20 +78,14 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     "--memory",
     `${memoryMb}m`,
     "--network",
-    "bridge",  // always bridge, DNS won't work with "none" anyway
-    "--dns",
-    "8.8.8.8",
-    "--dns",
-    "8.8.4.4",
+    networkEnabled ? "bridge" : "none",
+    ...(networkEnabled ? ["--dns", "8.8.8.8", "--dns", "8.8.4.4"] : []),
     "--pids-limit",
     "64",
-    // Batch jobs use --read-only for maximum isolation. Service containers skip it
-    // because npm install / pip install / etc. need a writable working directory.
-    ...(isService ? [] : ["--read-only"]),
     "--tmpfs",
-    "/tmp:rw,noexec,nosuid,size=128m",
+    "/tmp:rw,nosuid,size=512m",
     "--tmpfs",
-    "/var/tmp:rw,noexec,nosuid,size=64m",
+    "/var/tmp:rw,nosuid,size=64m",
     "--cap-drop",
     "ALL",
     "--security-opt",
