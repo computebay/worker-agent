@@ -1,0 +1,18 @@
+services:
+  worker-agent:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # Mount Docker socket — job containers run on the host, not inside this container
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Shared /tmp — worker creates temp dirs at /tmp/computebay-<jobId>-xxx
+      # and bind-mounts them into job containers. Docker resolves mount sources
+      # on the host, so this path must exist on the host filesystem.
+      - /tmp:/tmp
+      # Persist worker identity (Ed25519 keypair) and bootstrap state (scheduler registration)
+      # across container recreations. Without this, the worker gets a new identity each restart.
+      - ./data:/root/.computebay
+    # Docker CLI needs access to the socket's group
+    group_add:
+      - docker
