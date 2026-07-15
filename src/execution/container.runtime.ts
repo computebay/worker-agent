@@ -83,7 +83,7 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     "--pids-limit",
     "64",
     "--tmpfs",
-    "/tmp:rw,nosuid,size=512m",
+    "/tmp:rw,exec,nosuid,size=512m",
     "--tmpfs",
     "/var/tmp:rw,nosuid,size=64m",
     "--cap-drop",
