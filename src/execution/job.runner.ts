@@ -1,4 +1,4 @@
-import { mkdtemp, rm, appendFile, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, appendFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import type { ScheduledJob } from "../types/job.types.js";
@@ -82,6 +82,11 @@ export async function runJob(
       "Cloning repository"
     );
     const repoPath = await gitClone(repoUrl, job.branch ?? "main", workDirPath);
+
+    // Pre-create outputs directory when job declares artifacts
+    if (job.hasArtifacts) {
+      await mkdir(path.join(repoPath, "outputs"), { recursive: true });
+    }
 
     const mounts: ContainerMount[] = [
       { hostPath: repoPath, containerPath: CONTAINER_WORKSPACE },
@@ -229,7 +234,7 @@ export async function runJob(
 
     // Collect and upload output artifacts from /workspace/outputs
     let artifacts: import("../types/job.types.js").JobArtifact[] | undefined;
-    if (logUploadConfig) {
+    if (logUploadConfig && job.hasArtifacts) {
       const outputsDir = path.join(repoPath, "outputs");
       try {
         artifacts = await collectAndUploadArtifacts(

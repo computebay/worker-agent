@@ -24,7 +24,7 @@ export function getS3Client(config: S3Config): S3Client {
   if (!client) {
     client = new S3Client({
       region: config.region,
-      endpoint: config.endpoint,
+      endpoint: config.endpoint.replace(/\/+$/, ""),
       credentials: {
         accessKeyId: config.accessKey,
         secretAccessKey: config.secretKey,

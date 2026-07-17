@@ -33,6 +33,8 @@ export interface CreateJobInput {
   networkEnabled?: boolean;
   /** Container-internal port to expose (required for service jobs). */
   servicePort?: number;
+  /** When true, an outputs/ dir is pre-created and files in it are uploaded as artifacts after the job. */
+  hasArtifacts?: boolean;
   retryPolicy?: Record<string, unknown> | null;
   priority?: number;
   orgId: string;
@@ -58,6 +60,8 @@ export interface ScheduledJobMessage {
   networkEnabled?: boolean;
   /** Container-internal port to expose (required for service jobs). */
   servicePort?: number;
+  /** When true, an outputs/ dir is pre-created and files in it are uploaded as artifacts after the job. */
+  hasArtifacts?: boolean;
   retryPolicy?: Record<string, unknown> | null;
   priority?: number;
   orgId: string;
@@ -87,6 +91,8 @@ export interface ScheduledJob {
   branch?: string;
   /** Enable network in container (e.g. for scraping). Default false. */
   networkEnabled: boolean;
+  /** When true, an outputs/ dir is pre-created and files in it are uploaded as artifacts after the job. */
+  hasArtifacts: boolean;
   /** Container-internal port (required for service jobs). */
   servicePort?: number;
 }
@@ -133,6 +139,7 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
       cpu,
       memoryMB,
       networkEnabled: true, // services always need network
+      hasArtifacts: msg.hasArtifacts === true,
       servicePort: msg.servicePort,
       repoUrl: msg.repoUrl,
       branch: msg.branch,
@@ -157,6 +164,7 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
     repoUrl: msg.repoUrl,
     branch: msg.branch ?? "main",
     networkEnabled: msg.networkEnabled !== false,
+    hasArtifacts: msg.hasArtifacts === true,
   };
 }
 
