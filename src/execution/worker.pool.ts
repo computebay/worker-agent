@@ -3,21 +3,7 @@ import type { ResourceMonitor } from "../monitoring/resource.monitor.js";
 import { runJob, type LogUploadConfig } from "./job.runner.js";
 import { runService } from "./service.runner.js";
 import { serviceRegistry } from "./service.registry.js";
-import {
-  createAndStart,
-  getContainerLogs,
-  killContainer,
-  removeContainer,
-  waitContainer,
-  streamContainerLogs,
-  type ContainerMount,
-} from "./container.runtime.js";
-import { downloadInput, parseS3Url } from "../libs/artifact.download.js";
-import { uploadLogFile } from "../libs/log.upload.js";
 import { logger } from "../utils/logger.js";
-import { mkdtemp, rm, mkdir, writeFile, readdir, readFile, stat } from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
 
 export type JobResultCallback = (result: {
   jobId: string;
@@ -52,6 +38,8 @@ export interface WorkerPoolOptions {
   logUploadConfig?: LogUploadConfig;
   /** Called when a service container starts or fails to start. */
   onServiceResult?: ServiceResultCallback;
+  /** Root directory for per-job scratch dirs (default: os.tmpdir()). */
+  jobWorkDir?: string;
 }
 
 /**
@@ -69,6 +57,7 @@ export class WorkerPool {
   private readonly onLogChunk: LogChunkCallback | undefined;
   private readonly logUploadConfig: LogUploadConfig | undefined;
   private readonly onServiceResult: ServiceResultCallback | undefined;
+  private readonly jobWorkDir: string | undefined;
   private activeCount = 0;
   private draining = false;
 
@@ -84,6 +73,7 @@ export class WorkerPool {
     this.onLogChunk = options.onLogChunk;
     this.logUploadConfig = options.logUploadConfig;
     this.onServiceResult = options.onServiceResult;
+    this.jobWorkDir = options.jobWorkDir;
 
     // Wire resource-release callback into the service registry so that
     // stopService() correctly decrements the ResourceMonitor.
@@ -145,6 +135,7 @@ export class WorkerPool {
           ? (chunk) => this.onLogChunk!(job.jobId, chunk)
           : undefined,
         abortSignal: abortController.signal,
+        jobWorkDir: this.jobWorkDir,
       });
       this.cancelControllers.delete(job.jobId);
       logger.info(
@@ -175,17 +166,7 @@ export class WorkerPool {
     }
   }
 
-  /**
-   * Runs a batch-image job:
-   *  1. Create temp working directory
-   *  2. Download S3 input → local dir, bind-mount at job.input.mountPath
-   *  3. Pull image, create container, wait for exit
-   *  4. Upload local output dir → S3 at job.output.uploadFrom
-   *  5. Cleanup temp dir and container
-   */
-  private async runBatchImageJob(
-    job: Extract<ScheduledJob, { type: "batch-image" }>
-  ): Promise<void> {
+  private async runBatchImageJob(job: ScheduledJob): Promise<void> {
     if (!this.canAccept(job)) {
       throw new Error(
         `[${this._nodeId}] Cannot accept batch-image ${job.jobId}: draining=${this.draining} ` +
@@ -199,234 +180,31 @@ export class WorkerPool {
     const abortController = new AbortController();
     this.cancelControllers.set(job.jobId, abortController);
 
-    const containerId = `computebay-${job.jobId}`;
-    let workDirPath: string | undefined;
-
     try {
-      logger.info(
-        { jobId: job.jobId, image: job.image, command: job.command },
-        "Batch-image job started"
-      );
-
-      // 1. Create temp working directory
-      workDirPath = await mkdtemp(
-        path.join(os.tmpdir(), `computebay-img-${job.jobId}-`)
-      );
-      const logFilePath = path.join(workDirPath, "full.log");
-      await writeFile(logFilePath, "");
-
-      // 2. Download S3 input
-      const inputDir = path.join(workDirPath, "input");
-      await mkdir(inputDir, { recursive: true });
-      const inputLocalPath = path.join(inputDir, path.basename(job.input.mountPath));
-      await downloadInput(this.logUploadConfig!.s3Config, job.input.url, inputLocalPath);
-
-      // 3. Prepare container mounts
-      const mounts: ContainerMount[] = [
-        { hostPath: inputLocalPath, containerPath: job.input.mountPath },
-      ];
-
-      // Pre-create output directory inside workDir if uploadFrom is specified
-      if (job.output?.uploadFrom) {
-        const outputDir = path.dirname(path.join(workDirPath, job.output.uploadFrom));
-        await mkdir(outputDir, { recursive: true });
-      }
-
-      const currentUid = process.getuid?.() ?? 1000;
-      const currentGid = process.getgid?.() ?? 1000;
-      const runAsUser = `${currentUid}:${currentGid}`;
-
-      const logUploadConfig = this.logUploadConfig;
-
-      // 4. Create and start container
-      logger.info(
-        { jobId: job.jobId, containerId, image: job.image, command: job.command },
-        "Starting batch-image container"
-      );
-
-      await createAndStart({
-        containerId,
-        image: job.image,
-        cpu: job.cpu,
-        memoryMb: job.memoryMB,
-        command: job.command,
-        workDir: "/",
-        mounts,
-        networkEnabled: job.networkEnabled,
-        runAsUser,
+      const result = await runJob(job, {
+        timeoutMs: this.jobTimeoutMs,
+        logUploadConfig: this.logUploadConfig,
+        onLogChunk: this.onLogChunk
+          ? (chunk) => this.onLogChunk!(job.jobId, chunk)
+          : undefined,
+        abortSignal: abortController.signal,
+        jobWorkDir: this.jobWorkDir,
       });
-
-      // Stream logs
-      const stopLogStream = streamContainerLogs(containerId, {
-        onChunk: async (chunk) => {
-          await writeFile(logFilePath, chunk, { flag: "a" });
-          this.onLogChunk?.(job.jobId, chunk);
-        },
-        onEnd: () => {},
-        onError: (err) =>
-          logger.warn({ err, jobId: job.jobId }, "Log stream error"),
-      });
-
-      // Wait with timeout + cancellation
-      const jobTimeoutMs = job.timeoutMs ?? this.jobTimeoutMs;
-      let timedOut = false;
-
-      const waitPromise = waitContainer(containerId);
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => {
-          timedOut = true;
-          killContainer(containerId)
-            .then(() => reject(new Error("TIMEOUT")))
-            .catch(reject);
-        }, jobTimeoutMs);
-      });
-
-      const cancelPromise = abortController.signal.aborted
-        ? Promise.reject(new Error("CANCELLED"))
-        : new Promise<never>((_, reject) => {
-            abortController.signal.addEventListener(
-              "abort",
-              () =>
-                killContainer(containerId)
-                  .then(() => reject(new Error("CANCELLED")))
-                  .catch(reject),
-              { once: true }
-            );
-          });
-
-      let exitCode: number;
-      try {
-        const result = await Promise.race([
-          waitPromise,
-          timeoutPromise,
-          cancelPromise,
-        ]);
-        exitCode = result.exitCode;
-      } catch (err) {
-        if (timedOut || (err instanceof Error && err.message === "TIMEOUT")) {
-          timedOut = true;
-          exitCode = 137;
-          logger.warn(
-            { jobId: job.jobId, containerId },
-            "Batch-image job timed out"
-          );
-        } else if (err instanceof Error && err.message === "CANCELLED") {
-          exitCode = 137;
-          logger.info(
-            { jobId: job.jobId, containerId },
-            "Batch-image job cancelled"
-          );
-        } else {
-          throw err;
-        }
-      } finally {
-        stopLogStream();
-      }
-
-      // Fetch full logs
-      let output = "";
-      try {
-        output = await getContainerLogs(containerId);
-        await writeFile(logFilePath, output || "(no output)");
-      } catch (logErr) {
-        logger.warn(
-          { jobId: job.jobId, err: logErr },
-          "Failed to fetch container logs"
-        );
-      }
-
-      await removeContainer(containerId).catch((err) => {
-        logger.warn({ err, containerId }, "Failed to remove container");
-      });
-
-      // 5. Upload log to MinIO
-      let logObjectKey: string | undefined;
-      if (logUploadConfig) {
-        try {
-          logObjectKey = await uploadLogFile(
-            logUploadConfig.s3Config,
-            job.jobId,
-            logFilePath
-          );
-        } catch (uploadErr) {
-          logger.warn(
-            { err: uploadErr, jobId: job.jobId },
-            "Failed to upload log to MinIO"
-          );
-        }
-      }
-
-      // 6. Upload output files to S3
-      if (job.output?.uploadFrom && logUploadConfig) {
-        const localOutputDir = path.join(workDirPath, job.output.uploadFrom);
-        try {
-          await stat(localOutputDir);
-          const { bucket: outputBucket, key: outputPrefix } = parseS3Url(
-            job.output.uploadFrom
-          );
-
-          const entries = await readdir(localOutputDir, {
-            withFileTypes: true,
-          });
-          for (const entry of entries) {
-            if (!entry.isFile()) continue;
-            const filePath = path.join(localOutputDir, entry.name);
-            const body = await readFile(filePath);
-            const objectKey = `${outputPrefix}/${entry.name}`;
-
-            const s3 = (
-              await import("../libs/s3.js")
-            ).getS3Client({
-              ...logUploadConfig.s3Config,
-              bucket: outputBucket,
-            });
-            await s3.send(
-              new (
-                await import("@aws-sdk/client-s3")
-              ).PutObjectCommand({
-                Bucket: outputBucket,
-                Key: objectKey,
-                Body: body,
-              })
-            );
-            logger.info(
-              { jobId: job.jobId, key: objectKey, size: body.length },
-              "Uploaded output to S3"
-            );
-          }
-        } catch (outputErr) {
-          if (
-            outputErr instanceof Error &&
-            outputErr.message.includes("ENOENT")
-          ) {
-            logger.info(
-              { jobId: job.jobId, uploadFrom: job.output.uploadFrom },
-              "No output directory found, skipping upload"
-            );
-          } else {
-            logger.error(
-              { err: outputErr, jobId: job.jobId },
-              "Failed to upload output to S3"
-            );
-          }
-        }
-      }
-
       this.cancelControllers.delete(job.jobId);
       logger.info(
-        { jobId: job.jobId, exitCode, timedOut },
+        { jobId: job.jobId, exitCode: result.exitCode, timedOut: result.timedOut },
         "Batch-image job completed"
       );
       this.onJobResult({
         jobId: job.jobId,
-        exitCode,
-        timedOut,
-        output,
-        logObjectKey,
+        exitCode: result.exitCode,
+        timedOut: result.timedOut,
+        output: result.output,
+        logObjectKey: result.logObjectKey,
+        artifacts: result.artifacts,
       });
     } catch (err) {
       this.cancelControllers.delete(job.jobId);
-      await removeContainer(containerId).catch(() => {});
       logger.error({ err, jobId: job.jobId }, "Batch-image job execution failed");
       this.onJobResult({
         jobId: job.jobId,
@@ -436,9 +214,6 @@ export class WorkerPool {
         error: err instanceof Error ? err : new Error(String(err)),
       });
     } finally {
-      if (workDirPath) {
-        await rm(workDirPath, { recursive: true, force: true }).catch(() => {});
-      }
       this.activeCount--;
       this.resourceMonitor.release(job.cpu, job.memoryMB);
     }

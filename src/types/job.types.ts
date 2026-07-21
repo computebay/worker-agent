@@ -13,7 +13,12 @@ export type JobType = "batch" | "service" | "batch-image";
 
 export interface InputSpec {
   type: "s3";
-  url: string;
+  /** Full s3:// URL. If omitted, worker resolves from stagingKey or name+jobId. */
+  url?: string;
+  /** Staging key from upload. Resolved to inputs/<jobId>/<name> at runtime. */
+  stagingKey?: string;
+  /** Artifact name (filename). Used to construct URL when url is omitted. */
+  name?: string;
   mountPath: string;
 }
 
@@ -187,11 +192,27 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
       !msg.input ||
       typeof msg.input !== "object" ||
       msg.input.type !== "s3" ||
-      typeof msg.input.url !== "string" ||
       typeof msg.input.mountPath !== "string"
     ) {
       throw new InvalidJobPayloadError(
-        "input must be { type: 's3', url: string, mountPath: string } for batch-image jobs",
+        "input must be { type: 's3', name?: string, url?: string, stagingKey?: string, mountPath: string } for batch-image jobs",
+        msg
+      );
+    }
+    // Resolve input URL: priority — explicit url > stagingKey > name+jobId
+    let inputUrl: string | undefined;
+    if (msg.input.url && typeof msg.input.url === "string") {
+      inputUrl = msg.input.url;
+    } else if (msg.input.stagingKey && typeof msg.input.stagingKey === "string") {
+      // Staging key is a raw S3 key (e.g. "staging/<uuid>-file.mp4").
+      // Stored as-is; downloadInput() resolves it using the configured bucket.
+      inputUrl = `staging://${msg.input.stagingKey}`;
+    } else if (msg.input.name && typeof msg.input.name === "string") {
+      inputUrl = `inputs/${msg.jobId}/${msg.input.name}`;
+    }
+    if (!inputUrl) {
+      throw new InvalidJobPayloadError(
+        "input.url, input.stagingKey, or input.name is required for batch-image jobs",
         msg
       );
     }
@@ -219,7 +240,7 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
       type: "batch-image",
       image: msg.image,
       command: msg.command as string[],
-      input: msg.input as InputSpec,
+      input: { type: "s3", url: inputUrl, mountPath: msg.input.mountPath },
       output: msg.output as OutputSpec,
       cpu,
       memoryMB,

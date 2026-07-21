@@ -128,6 +128,7 @@ async function main(): Promise<void> {
     maxConcurrency,
     jobTimeoutMs: config.JOB_TIMEOUT_MS,
     logUploadConfig,
+    jobWorkDir: config.JOB_WORK_DIR,
     onLogChunk: (jobId, chunk) => {
       publishNodeEvent("job.log.chunk", { jobId, chunk });
     },

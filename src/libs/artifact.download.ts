@@ -42,9 +42,16 @@ export async function downloadInput(
   sourceUrl: string,
   destPath: string
 ): Promise<void> {
-  const { bucket, key } = parseS3Url(sourceUrl);
+  let key: string;
+  if (sourceUrl.startsWith("staging://")) {
+    // staging:// prefix — raw S3 key, use configured bucket
+    key = sourceUrl.slice("staging://".length);
+  } else {
+    const parsed = parseS3Url(sourceUrl);
+    key = parsed.key;
+  }
 
-  logger.info({ bucket, key, destPath }, "Downloading S3 input");
+  logger.info({ key, destPath }, "Downloading S3 input");
 
   let body: Buffer;
   try {
@@ -53,7 +60,7 @@ export async function downloadInput(
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("NoSuchKey") || msg.includes("404")) {
       throw new Error(
-        `S3 object not found: ${sourceUrl} (bucket=${bucket}, key=${key})`
+        `S3 object not found: ${sourceUrl} (key=${key})`
       );
     }
     throw new Error(
@@ -66,7 +73,7 @@ export async function downloadInput(
 
   await writeFile(destPath, body);
   logger.info(
-    { bucket, key, destPath, sizeBytes: body.length },
+    { key, destPath, sizeBytes: body.length },
     "S3 input downloaded"
   );
 }
