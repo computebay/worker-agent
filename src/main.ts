@@ -182,7 +182,7 @@ async function main(): Promise<void> {
 
       const isService = typeStr === "service";
       const isBatchImage = typeStr === "batch-image";
-      logger.info({ jobId: msg.jobId, runtime: msg.runtime, type: msg.type ?? "batch" }, "Job received");
+      logger.info({ jobId: msg.jobId, runtime: msg.runtime, jobType: msg.jobType }, "Job received");
 
       // Common required fields for all job types
       if (

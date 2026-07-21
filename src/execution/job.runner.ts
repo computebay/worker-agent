@@ -313,7 +313,7 @@ async function runBatchImageJob(
     // 1. Input: download S3 object into local dir, mount read-only
     const inputDir = path.join(workDirPath, "input");
     await mkdir(inputDir, { recursive: true });
-    const inputFileName = path.basename(job.input.mountPath);
+    const inputFileName = job.input.name ?? path.basename(job.input.mountPath);
     const inputLocalPath = path.join(inputDir, inputFileName);
 
     await downloadInput(logUploadConfig.s3Config, job.input.url!, inputLocalPath);
@@ -324,7 +324,7 @@ async function runBatchImageJob(
 
     // 3. Mounts: input read-only, output read-write
     const mounts: ContainerMount[] = [
-      { hostPath: inputLocalPath, containerPath: job.input.mountPath },
+      { hostPath: inputDir, containerPath: job.input.mountPath },
       { hostPath: outputDir, containerPath: job.output.uploadFrom },
     ];
 

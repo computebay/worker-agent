@@ -240,7 +240,7 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
       type: "batch-image",
       image: msg.image,
       command: msg.command as string[],
-      input: { type: "s3", url: inputUrl, mountPath: msg.input.mountPath },
+      input: { type: "s3", url: inputUrl, name: msg.input.name, mountPath: msg.input.mountPath },
       output: msg.output as OutputSpec,
       cpu,
       memoryMB,
