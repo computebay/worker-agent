@@ -103,6 +103,9 @@ export class WorkerPool {
     if (job.type === "service") {
       return this.runService(job);
     }
+    if (job.type === "batch-image") {
+      return this.runBatchImageJob(job);
+    }
     return this.runBatchJob(job);
   }
 
@@ -145,6 +148,59 @@ export class WorkerPool {
     } catch (err) {
       this.cancelControllers.delete(job.jobId);
       logger.error({ err, jobId: job.jobId }, "Job execution failed");
+      this.onJobResult({
+        jobId: job.jobId,
+        exitCode: -1,
+        timedOut: false,
+        output: "",
+        error: err instanceof Error ? err : new Error(String(err)),
+      });
+    } finally {
+      this.activeCount--;
+      this.resourceMonitor.release(job.cpu, job.memoryMB);
+    }
+  }
+
+  /**
+   * Runs a batch-image job: pull image, mount S3 input, execute command, upload S3 output.
+   * TODO: implement actual container lifecycle (image pull, volume mounts, S3 sync).
+   */
+  private async runBatchImageJob(
+    job: Extract<ScheduledJob, { type: "batch-image" }>
+  ): Promise<void> {
+    if (!this.canAccept(job)) {
+      throw new Error(
+        `[${this._nodeId}] Cannot accept batch-image ${job.jobId}: draining=${this.draining} ` +
+          `active=${this.activeCount}/${this.maxConcurrency} or insufficient resources`
+      );
+    }
+
+    this.activeCount++;
+    this.resourceMonitor.allocate(job.cpu, job.memoryMB);
+
+    const abortController = new AbortController();
+    this.cancelControllers.set(job.jobId, abortController);
+
+    try {
+      logger.info(
+        { jobId: job.jobId, image: job.image, command: job.command },
+        "Batch-image job started"
+      );
+
+      // TODO: pull image, mount S3 input to job.input.mountPath,
+      //       run job.command, upload job.output.uploadFrom to S3
+
+      this.cancelControllers.delete(job.jobId);
+      logger.info({ jobId: job.jobId }, "Batch-image job completed");
+      this.onJobResult({
+        jobId: job.jobId,
+        exitCode: 0,
+        timedOut: false,
+        output: "",
+      });
+    } catch (err) {
+      this.cancelControllers.delete(job.jobId);
+      logger.error({ err, jobId: job.jobId }, "Batch-image job execution failed");
       this.onJobResult({
         jobId: job.jobId,
         exitCode: -1,

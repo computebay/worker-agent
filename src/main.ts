@@ -180,30 +180,56 @@ async function main(): Promise<void> {
       }
 
       const isService = typeStr === "service";
+      const isBatchImage = typeStr === "batch-image";
       logger.info({ jobId: msg.jobId, runtime: msg.runtime, type: msg.type ?? "batch" }, "Job received");
 
-      // Common required fields for both job types
+      // Common required fields for all job types
       if (
         !msg.jobId ||
         !msg.jobType ||
-        !msg.runtime ||
         !msg.resources ||
         typeof msg.resources !== "object" ||
         !msg.orgId
       ) {
         logger.warn(
           { payload },
-          "Invalid job payload: missing jobId, jobType, runtime, resources, or orgId. Discarding."
+          "Invalid job payload: missing jobId, jobType, resources, or orgId. Discarding."
         );
         throw new InvalidJobPayloadError("Payload missing required fields", payload);
       }
 
+      // batch-image: require image, command, input, output
+      if (isBatchImage) {
+        if (!msg.image || typeof msg.image !== "string") {
+          logger.warn({ payload }, "batch-image job missing image. Discarding.");
+          throw new InvalidJobPayloadError("image is required for batch-image jobs", payload);
+        }
+        if (!Array.isArray(msg.command) || msg.command.length === 0) {
+          logger.warn({ payload }, "batch-image job missing command. Discarding.");
+          throw new InvalidJobPayloadError("command must be a non-empty array for batch-image jobs", payload);
+        }
+        if (!msg.input || typeof msg.input !== "object") {
+          logger.warn({ payload }, "batch-image job missing input. Discarding.");
+          throw new InvalidJobPayloadError("input is required for batch-image jobs", payload);
+        }
+        if (!msg.output || typeof msg.output !== "object") {
+          logger.warn({ payload }, "batch-image job missing output. Discarding.");
+          throw new InvalidJobPayloadError("output is required for batch-image jobs", payload);
+        }
+      }
+
+      // runtime is required for batch and service (not batch-image which uses image directly)
+      if (!isBatchImage && (!msg.runtime || typeof msg.runtime !== "string")) {
+        logger.warn({ payload }, "Job missing runtime. Discarding.");
+        throw new InvalidJobPayloadError("runtime (Docker image) is required", payload);
+      }
+
       // Batch-only required fields
-      if (!isService && (!msg.repoUrl || typeof msg.repoUrl !== "string")) {
+      if (!isService && !isBatchImage && (!msg.repoUrl || typeof msg.repoUrl !== "string")) {
         logger.warn({ payload }, "Batch job missing repoUrl. Discarding.");
         throw new InvalidJobPayloadError("repoUrl is required for batch jobs", payload);
       }
-      if (!isService && (!msg.startCommand || typeof msg.startCommand !== "string")) {
+      if (!isService && !isBatchImage && (!msg.startCommand || typeof msg.startCommand !== "string")) {
         logger.warn({ payload }, "Batch job missing startCommand. Discarding.");
         throw new InvalidJobPayloadError("startCommand is required for batch jobs", payload);
       }

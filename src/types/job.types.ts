@@ -9,7 +9,35 @@ export class InvalidJobPayloadError extends Error {
   }
 }
 
-export type JobType = "batch" | "service";
+export type JobType = "batch" | "service" | "batch-image";
+
+export interface InputSpec {
+  type: "s3";
+  url: string;
+  mountPath: string;
+}
+
+export interface OutputSpec {
+  type: "s3";
+  uploadFrom: string;
+}
+
+export interface BatchImageResources {
+  cpu: number;
+  memoryMb: number;
+  gpu: "any" | "none";
+}
+
+export interface BatchImageJob extends ScheduledJobBase {
+  type: "batch-image";
+  image: string;
+  command: string[];
+  input: InputSpec;
+  output: OutputSpec;
+  cpu: number;
+  memoryMB: number;
+  gpu: "any" | "none";
+}
 
 /**
  * Job payload shape from Job Service (same as CreateJobInput).
@@ -17,7 +45,7 @@ export type JobType = "batch" | "service";
  */
 export interface CreateJobInput {
   jobType: string;
-  /** Discriminates batch vs. service execution. Default: "batch". */
+  /** Discriminates batch vs. service vs. batch-image execution. Default: "batch". */
   type?: JobType;
   runtime: string;
   /** Git repo URL to clone. Required for batch jobs. */
@@ -28,6 +56,8 @@ export interface CreateJobInput {
   startCommand?: string;
   /** Command passed directly to the container entrypoint (service jobs). */
   entrypoint?: string[];
+  /** Command array for batch-image jobs. */
+  command?: string[];
   resources: Record<string, unknown>;
   /** Optional: enable network for scraping jobs. Default false. */
   networkEnabled?: boolean;
@@ -38,6 +68,10 @@ export interface CreateJobInput {
   retryPolicy?: Record<string, unknown> | null;
   priority?: number;
   orgId: string;
+  /** Input specification for batch-image jobs. */
+  input?: InputSpec;
+  /** Output specification for batch-image jobs. */
+  output?: OutputSpec;
 }
 
 /**
@@ -46,9 +80,11 @@ export interface CreateJobInput {
 export interface ScheduledJobMessage {
   jobId: string;
   jobType: string;
-  /** Discriminates batch vs. service execution. Default: "batch". */
+  /** Discriminates batch vs. service vs. batch-image execution. Default: "batch". */
   type?: JobType;
   runtime: string;
+  /** Docker image for batch-image jobs. */
+  image?: string;
   /** Required for batch jobs; optional for service jobs. */
   repoUrl?: string;
   branch?: string;
@@ -56,6 +92,8 @@ export interface ScheduledJobMessage {
   startCommand?: string;
   /** Command passed directly to the container entrypoint (service jobs). */
   entrypoint?: string[];
+  /** Command array for batch-image jobs. */
+  command?: string[];
   resources: Record<string, unknown>;
   networkEnabled?: boolean;
   /** Container-internal port to expose (required for service jobs). */
@@ -65,37 +103,49 @@ export interface ScheduledJobMessage {
   retryPolicy?: Record<string, unknown> | null;
   priority?: number;
   orgId: string;
+  /** Input specification for batch-image jobs. */
+  input?: InputSpec;
+  /** Output specification for batch-image jobs. */
+  output?: OutputSpec;
 }
 
 /**
  * Internal job shape used for container execution (derived from ScheduledJobMessage).
- * Batch: clone repo, mount as /workspace, run startCommand via sh -c.
- * Service: run image directly with optional entrypoint, expose servicePort.
+ * Discriminated union: batch | service | batch-image.
  */
-export interface ScheduledJob {
+
+interface ScheduledJobBase {
   jobId: string;
-  /** Discriminates batch vs. service execution. */
-  type: JobType;
-  image: string;
-  /** Shell command to run (batch jobs). */
-  startCommand?: string;
-  /** Direct container entrypoint (service jobs). */
-  entrypoint?: string[];
   cpu: number;
   memoryMB: number;
   timeoutMs?: number;
   env?: Record<string, string>;
-  /** Git repo URL. Required for batch jobs. */
-  repoUrl?: string;
-  /** Git branch (default: main). */
-  branch?: string;
-  /** Enable network in container (e.g. for scraping). Default false. */
   networkEnabled: boolean;
-  /** When true, an outputs/ dir is pre-created and files in it are uploaded as artifacts after the job. */
   hasArtifacts: boolean;
-  /** Container-internal port (required for service jobs). */
-  servicePort?: number;
 }
+
+export interface ScheduledBatchJob extends ScheduledJobBase {
+  type: "batch";
+  image: string;
+  startCommand: string;
+  repoUrl: string;
+  branch: string;
+}
+
+export interface ScheduledServiceJob extends ScheduledJobBase {
+  type: "service";
+  image: string;
+  entrypoint?: string[];
+  startCommand?: string;
+  servicePort: number;
+  repoUrl?: string;
+  branch?: string;
+}
+
+export type ScheduledJob =
+  | ScheduledBatchJob
+  | ScheduledServiceJob
+  | BatchImageJob;
 
 /**
  * Maps Job Service payload to internal ScheduledJob.
@@ -103,7 +153,6 @@ export interface ScheduledJob {
 export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
   // Normalize: check `type` first, fall back to `jobType`, ignore case.
   const rawType = (msg.type ?? msg.jobType ?? "").toLowerCase();
-  const jobType: JobType = rawType === "service" ? "service" : "batch";
 
   const cpu = msg.resources?.cpu;
   const memoryMB = msg.resources?.memoryMB ?? msg.resources?.memoryMb;
@@ -119,11 +168,73 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
       msg
     );
   }
+
+  // --- batch-image ---
+  if (rawType === "batch-image") {
+    if (!msg.image || typeof msg.image !== "string") {
+      throw new InvalidJobPayloadError(
+        "image is required for batch-image jobs",
+        msg
+      );
+    }
+    if (!Array.isArray(msg.command) || msg.command.length === 0) {
+      throw new InvalidJobPayloadError(
+        "command must be a non-empty array for batch-image jobs",
+        msg
+      );
+    }
+    if (
+      !msg.input ||
+      typeof msg.input !== "object" ||
+      msg.input.type !== "s3" ||
+      typeof msg.input.url !== "string" ||
+      typeof msg.input.mountPath !== "string"
+    ) {
+      throw new InvalidJobPayloadError(
+        "input must be { type: 's3', url: string, mountPath: string } for batch-image jobs",
+        msg
+      );
+    }
+    if (
+      !msg.output ||
+      typeof msg.output !== "object" ||
+      msg.output.type !== "s3" ||
+      typeof msg.output.uploadFrom !== "string"
+    ) {
+      throw new InvalidJobPayloadError(
+        "output must be { type: 's3', uploadFrom: string } for batch-image jobs",
+        msg
+      );
+    }
+    const gpu = msg.resources?.gpu;
+    if (gpu !== "any" && gpu !== "none") {
+      throw new InvalidJobPayloadError(
+        "resources.gpu must be 'any' or 'none' for batch-image jobs",
+        msg
+      );
+    }
+
+    return {
+      jobId: msg.jobId,
+      type: "batch-image",
+      image: msg.image,
+      command: msg.command as string[],
+      input: msg.input as InputSpec,
+      output: msg.output as OutputSpec,
+      cpu,
+      memoryMB,
+      gpu,
+      networkEnabled: false,
+      hasArtifacts: false,
+    };
+  }
+
   if (!msg.runtime || typeof msg.runtime !== "string") {
     throw new InvalidJobPayloadError("runtime (Docker image) is required", msg);
   }
 
-  if (jobType === "service") {
+  // --- service ---
+  if (rawType === "service") {
     if (!msg.servicePort || typeof msg.servicePort !== "number" || msg.servicePort <= 0) {
       throw new InvalidJobPayloadError(
         "servicePort must be a positive number for service jobs",
@@ -138,7 +249,7 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
       startCommand: msg.startCommand,
       cpu,
       memoryMB,
-      networkEnabled: true, // services always need network
+      networkEnabled: true,
       hasArtifacts: msg.hasArtifacts === true,
       servicePort: msg.servicePort,
       repoUrl: msg.repoUrl,
@@ -146,7 +257,7 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
     };
   }
 
-  // Batch job — existing validation
+  // --- batch (existing) ---
   if (!msg.repoUrl || typeof msg.repoUrl !== "string") {
     throw new InvalidJobPayloadError("repoUrl is required for batch jobs", msg);
   }
