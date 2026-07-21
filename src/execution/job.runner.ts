@@ -1,6 +1,9 @@
 import { mkdtemp, rm, appendFile, writeFile, mkdir } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import path from "node:path";
 import os from "node:os";
+const execFileAsync = promisify(execFile);
 import type { ScheduledJob, ScheduledBatchJob, BatchImageJob } from "../types/job.types.js";
 import {
   createAndStart,
@@ -321,6 +324,9 @@ async function runBatchImageJob(
     // 2. Output: empty dir for container to write into, mounted read-write
     const outputDir = path.join(workDirPath, "output");
     await mkdir(outputDir, { recursive: true });
+
+    // 3. Ensure directories are writable by the container user (uid:gid)
+    await execFileAsync("chmod", ["777", inputDir, outputDir]);
 
     // 3. Mounts: input read-only, output read-write
     const mounts: ContainerMount[] = [
