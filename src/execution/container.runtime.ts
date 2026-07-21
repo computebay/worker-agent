@@ -21,6 +21,8 @@ export interface ContainerCreateOptions {
   networkEnabled?: boolean;
   /** Run container as this UID:GID (e.g. "1000:1000") to match host file ownership. */
   runAsUser?: string;
+  /** Capabilities to add back after --cap-drop ALL (e.g. ["SETUID", "SETGID"]). */
+  capAdd?: string[];
   /** Port bindings for service containers: { hostPort, containerPort }[]. */
   portBindings?: Array<{ hostPort: number; containerPort: number }>;
 }
@@ -47,6 +49,7 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     mounts = [],
     networkEnabled = false,
     runAsUser,
+    capAdd = [],
     portBindings = [],
   } = options;
 
@@ -88,6 +91,7 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     "/var/tmp:rw,nosuid,size=64m",
     "--cap-drop",
     "ALL",
+    ...capAdd.flatMap((cap) => ["--cap-add", cap]),
     "--security-opt",
     "no-new-privileges",
     ...(runAsUser ? ["--user", runAsUser] : []),

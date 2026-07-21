@@ -303,7 +303,6 @@ async function runBatchImageJob(
   const containerId = `computebay-img-${job.jobId}`;
   const currentUid = process.getuid?.() ?? 1000;
   const currentGid = process.getgid?.() ?? 1000;
-  const runAsUser = `${currentUid}:${currentGid}`;
 
   const baseWorkDir = options.jobWorkDir ?? os.tmpdir();
   const workDirPath = await mkdtemp(
@@ -347,6 +346,7 @@ async function runBatchImageJob(
     );
 
     // 4. Create and start container — command passed as exec array, no sh -c
+    //    Use PUID/PGID env vars (linuxserver images) instead of --user flag
     try {
       await createAndStart({
         containerId,
@@ -356,7 +356,11 @@ async function runBatchImageJob(
         command: job.command,
         mounts,
         networkEnabled: job.networkEnabled,
-        runAsUser,
+        env: {
+          PUID: String(currentUid),
+          PGID: String(currentGid),
+        },
+        capAdd: ["SETUID", "SETGID", "SETFCAP"],
       });
     } catch (err) {
       logger.error({ err, jobId: job.jobId }, "Failed to create batch-image container");
