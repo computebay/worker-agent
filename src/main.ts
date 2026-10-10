@@ -7,6 +7,7 @@ import { createConnection, closeConnection } from "./messaging/rabbit.connection
 import { consume, cancelConsumer, consumeCancelShared } from "./messaging/rabbit.consumer.js";
 import { publish } from "./messaging/rabbit.publisher.js";
 import { WorkerPool } from "./execution/worker.pool.js";
+import { stampLogChunk } from "./execution/log.envelope.js";
 import { serviceRegistry } from "./execution/service.registry.js";
 import { gracefulShutdown, installSigTermHandler } from "./lifecycle/shutdown.js";
 import type { ScheduledJobMessage } from "./types/job.types.js";
@@ -130,7 +131,7 @@ async function main(): Promise<void> {
     logUploadConfig,
     jobWorkDir: config.JOB_WORK_DIR,
     onLogChunk: (jobId, chunk) => {
-      publishNodeEvent("job.log.chunk", { jobId, chunk });
+      publishNodeEvent("job.log.chunk", { jobId, ...stampLogChunk(chunk) });
     },
     onJobResult: ({ jobId, exitCode, timedOut, output, logObjectKey, artifacts, error }) => {
       // A user stop landed mid-run: report cancellation (not failure) so the
