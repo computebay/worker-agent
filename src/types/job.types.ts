@@ -37,7 +37,8 @@ export interface BatchImageJob extends ScheduledJobBase {
   type: "batch-image";
   image: string;
   command: string[];
-  input: InputSpec;
+  /** Optional — jobs that generate output from scratch set no input. */
+  input?: InputSpec;
   output: OutputSpec;
   cpu: number;
   memoryMB: number;
@@ -188,33 +189,40 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
         msg
       );
     }
-    if (
-      !msg.input ||
-      typeof msg.input !== "object" ||
-      msg.input.type !== "s3" ||
-      typeof msg.input.mountPath !== "string"
-    ) {
-      throw new InvalidJobPayloadError(
-        "input must be { type: 's3', name?: string, url?: string, stagingKey?: string, mountPath: string } for batch-image jobs",
-        msg
-      );
-    }
-    // Resolve input URL: priority — explicit url > stagingKey > name+jobId
+    // Input is optional — jobs that generate output from scratch or fetch
+    // their own data set no input.
     let inputUrl: string | undefined;
-    if (msg.input.url && typeof msg.input.url === "string") {
-      inputUrl = msg.input.url;
-    } else if (msg.input.stagingKey && typeof msg.input.stagingKey === "string") {
-      // Staging key is a raw S3 key (e.g. "staging/<uuid>-file.mp4").
-      // Stored as-is; downloadInput() resolves it using the configured bucket.
-      inputUrl = `staging://${msg.input.stagingKey}`;
-    } else if (msg.input.name && typeof msg.input.name === "string") {
-      inputUrl = `inputs/${msg.jobId}/${msg.input.name}`;
-    }
-    if (!inputUrl) {
-      throw new InvalidJobPayloadError(
-        "input.url, input.stagingKey, or input.name is required for batch-image jobs",
-        msg
-      );
+    let inputName: string | undefined;
+    let inputMountPath: string | undefined;
+    if (msg.input !== undefined) {
+      if (
+        typeof msg.input !== "object" ||
+        msg.input.type !== "s3" ||
+        typeof msg.input.mountPath !== "string"
+      ) {
+        throw new InvalidJobPayloadError(
+          "input must be { type: 's3', name?: string, url?: string, stagingKey?: string, mountPath: string } for batch-image jobs",
+          msg
+        );
+      }
+      // Resolve input URL: priority — explicit url > stagingKey > name+jobId
+      if (msg.input.url && typeof msg.input.url === "string") {
+        inputUrl = msg.input.url;
+      } else if (msg.input.stagingKey && typeof msg.input.stagingKey === "string") {
+        // Staging key is a raw S3 key (e.g. "staging/<uuid>-file.mp4").
+        // Stored as-is; downloadInput() resolves it using the configured bucket.
+        inputUrl = `staging://${msg.input.stagingKey}`;
+      } else if (msg.input.name && typeof msg.input.name === "string") {
+        inputUrl = `inputs/${msg.jobId}/${msg.input.name}`;
+      }
+      if (!inputUrl) {
+        throw new InvalidJobPayloadError(
+          "input.url, input.stagingKey, or input.name is required for batch-image jobs",
+          msg
+        );
+      }
+      inputName = msg.input.name;
+      inputMountPath = msg.input.mountPath;
     }
     if (
       !msg.output ||
@@ -240,7 +248,9 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
       type: "batch-image",
       image: msg.image,
       command: msg.command as string[],
-      input: { type: "s3", url: inputUrl, name: msg.input.name, mountPath: msg.input.mountPath },
+      input: inputUrl
+        ? { type: "s3", url: inputUrl, name: inputName, mountPath: inputMountPath! }
+        : undefined,
       output: msg.output as OutputSpec,
       cpu,
       memoryMB,

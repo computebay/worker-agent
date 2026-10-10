@@ -312,26 +312,32 @@ async function runBatchImageJob(
   await writeFile(logFilePath, "");
 
   try {
-    // 1. Input: download S3 object into local dir, mount read-only
-    const inputDir = path.join(workDirPath, "input");
-    await mkdir(inputDir, { recursive: true });
-    const inputFileName = job.input.name ?? path.basename(job.input.mountPath);
-    const inputLocalPath = path.join(inputDir, inputFileName);
+    // 1. Input (optional): download S3 object into local dir, mount read-only.
+    // Jobs that generate output from scratch set no input.
+    const mounts: ContainerMount[] = [];
+    if (job.input) {
+      const inputDir = path.join(workDirPath, "input");
+      await mkdir(inputDir, { recursive: true });
+      const inputFileName = job.input.name ?? path.basename(job.input.mountPath);
+      const inputLocalPath = path.join(inputDir, inputFileName);
 
-    await downloadInput(logUploadConfig.s3Config, job.input.url!, inputLocalPath);
+      await downloadInput(logUploadConfig.s3Config, job.input.url!, inputLocalPath);
+
+      // 3. Ensure directories are writable by the container user (uid:gid)
+      await execFileAsync("chmod", ["777", inputDir]);
+
+      mounts.push({ hostPath: inputDir, containerPath: job.input.mountPath });
+    }
 
     // 2. Output: empty dir for container to write into, mounted read-write
     const outputDir = path.join(workDirPath, "output");
     await mkdir(outputDir, { recursive: true });
 
     // 3. Ensure directories are writable by the container user (uid:gid)
-    await execFileAsync("chmod", ["777", inputDir, outputDir]);
+    await execFileAsync("chmod", ["777", outputDir]);
 
-    // 3. Mounts: input read-only, output read-write
-    const mounts: ContainerMount[] = [
-      { hostPath: inputDir, containerPath: job.input.mountPath },
-      { hostPath: outputDir, containerPath: job.output.uploadFrom },
-    ];
+    // 3. Mounts: input read-only (when present), output read-write
+    mounts.push({ hostPath: outputDir, containerPath: job.output.uploadFrom });
 
     logger.info(
       {
@@ -339,7 +345,7 @@ async function runBatchImageJob(
         containerId,
         image: job.image,
         command: job.command,
-        inputMount: job.input.mountPath,
+        inputMount: job.input?.mountPath,
         outputMount: job.output.uploadFrom,
       },
       "Starting batch-image container"
