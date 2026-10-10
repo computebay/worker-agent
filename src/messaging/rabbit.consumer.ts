@@ -87,3 +87,43 @@ export async function consumeCancel(
   logger.info({ cancelQueue }, "Cancel consumer started");
   return consumerTag;
 }
+
+/**
+ * Priority cancel consumer on the dedicated `<queue>.cancel` lane.
+ * No declare here: the queue is declared by privileged services (scheduler
+ * at registration, job-service on emit) because the worker's scoped user
+ * cannot configure anything. Only CANCEL payloads are ever published here,
+ * so anything else is dropped (never requeued — that would hot-loop).
+ */
+export async function consumeCancelShared(
+  channel: Channel,
+  queue: string,
+  onCancel: CancelHandler
+): Promise<string> {
+  const { consumerTag } = await channel.consume(
+    queue,
+    (msg) => {
+      if (!msg) return;
+      try {
+        const payload = JSON.parse(msg.content.toString("utf-8"));
+        const typeStr = String(payload?.type ?? payload?.jobType ?? "").toLowerCase();
+        const jobId = payload?.jobId;
+        if (typeof jobId === "string" && (typeStr === "cancel" || typeStr === "cancelled")) {
+          onCancel(jobId);
+        }
+      } catch {
+        // Unparseable — drop, never requeue into a hot loop.
+      } finally {
+        try {
+          channel.ack(msg);
+        } catch {
+          // Channel gone — shutting down.
+        }
+      }
+    },
+    { noAck: false }
+  );
+
+  logger.info({ queue }, "Priority cancel consumer started");
+  return consumerTag;
+}

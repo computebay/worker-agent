@@ -4,7 +4,7 @@ import { detectSystemSpecs } from "./monitoring/system.specs.js";
 import { computeAllocatable } from "./monitoring/capacity.js";
 import { ResourceMonitor } from "./monitoring/resource.monitor.js";
 import { createConnection, closeConnection } from "./messaging/rabbit.connection.js";
-import { consume, cancelConsumer } from "./messaging/rabbit.consumer.js";
+import { consume, cancelConsumer, consumeCancelShared } from "./messaging/rabbit.consumer.js";
 import { publish } from "./messaging/rabbit.publisher.js";
 import { WorkerPool } from "./execution/worker.pool.js";
 import { serviceRegistry } from "./execution/service.registry.js";
@@ -133,6 +133,19 @@ async function main(): Promise<void> {
       publishNodeEvent("job.log.chunk", { jobId, chunk });
     },
     onJobResult: ({ jobId, exitCode, timedOut, output, logObjectKey, artifacts, error }) => {
+      // A user stop landed mid-run: report cancellation (not failure) so the
+      // backend keeps CANCELLED instead of flipping to FAILED/exit-137.
+      if (cancelledJobs.has(jobId)) {
+        cancelledJobs.delete(jobId);
+        publishNodeEvent("job.cancelled", {
+          jobId,
+          error: "Stopped by user",
+          output: output ?? "",
+          ...(logObjectKey != null ? { logObjectKey } : {}),
+          ...(artifacts?.length ? { artifacts } : {}),
+        });
+        return;
+      }
       if (timedOut) {
         publishNodeEvent("job.timeout", { jobId, output: output ?? "", ...(logObjectKey != null ? { logObjectKey } : {}) });
       } else if (error) {
@@ -166,6 +179,19 @@ async function main(): Promise<void> {
 
   logger.info({ nodeId, maxConcurrency }, "Starting job consumer");
 
+  // Jobs the user asked to stop. When their run finishes (aborted container),
+  // onJobResult reports job.cancelled instead of job.failed.
+  const cancelledJobs = new Set<string>();
+
+  const handleCancelSignal = (jobId: string): void => {
+    cancelledJobs.add(jobId);
+    workerPool.cancelJob(jobId);
+    // Service jobs finish outside onJobResult — report the stop explicitly.
+    if (serviceRegistry.getService(jobId)) {
+      publishNodeEvent("service.stopped", { jobId, serviceId: jobId });
+    }
+  };
+
   const consumerTag = await consume(
     ctx.channel,
     queue,
@@ -176,7 +202,7 @@ async function main(): Promise<void> {
       
       if (typeStr === "cancel" || typeStr === "cancelled") {
         logger.info({ jobId: msg.jobId }, "Received job cancellation dispatch from queue");
-        if (msg.jobId) workerPool.cancelJob(msg.jobId);
+        if (msg.jobId) handleCancelSignal(msg.jobId);
         return;
       }
 
@@ -199,7 +225,8 @@ async function main(): Promise<void> {
         throw new InvalidJobPayloadError("Payload missing required fields", payload);
       }
 
-      // batch-image: require image, command, input, output
+      // batch-image: require image, command, output (input is optional —
+      // jobs that generate output from scratch set no input)
       if (isBatchImage) {
         if (!msg.image || typeof msg.image !== "string") {
           logger.warn({ payload }, "batch-image job missing image. Discarding.");
@@ -209,9 +236,9 @@ async function main(): Promise<void> {
           logger.warn({ payload }, "batch-image job missing command. Discarding.");
           throw new InvalidJobPayloadError("command must be a non-empty array for batch-image jobs", payload);
         }
-        if (!msg.input || typeof msg.input !== "object") {
-          logger.warn({ payload }, "batch-image job missing input. Discarding.");
-          throw new InvalidJobPayloadError("input is required for batch-image jobs", payload);
+        if (msg.input !== undefined && typeof msg.input !== "object") {
+          logger.warn({ payload }, "batch-image job has invalid input. Discarding.");
+          throw new InvalidJobPayloadError("input must be an object for batch-image jobs", payload);
         }
         if (!msg.output || typeof msg.output !== "object") {
           logger.warn({ payload }, "batch-image job missing output. Discarding.");
@@ -242,8 +269,12 @@ async function main(): Promise<void> {
         throw new Error(`Cannot accept job ${job.jobId}: resources unavailable or draining`);
       }
 
-      // Publish job.started for ALL jobs so the backend transitions status from QUEUED to RUNNING
-      publishNodeEvent("job.started", { jobId: job.jobId });
+      // Publish job.started for ALL jobs so the backend transitions status from QUEUED to RUNNING.
+      // Anonymized specs only (cpu/memory totals) — no contributor identity.
+      publishNodeEvent("job.started", {
+        jobId: job.jobId,
+        worker: { cpu: specs.totalCpu, memoryMb: specs.totalMemoryMb },
+      });
 
       if (isService) {
         logger.info({ jobId: job.jobId }, "Service job accepted, starting container");
@@ -255,6 +286,18 @@ async function main(): Promise<void> {
       logger.info({ jobId: job.jobId, type: job.type }, "Job/service dispatched");
     }
   );
+
+  // Priority cancel lane: dedicated `<queue>.cancel` queue with its own
+  // consumer, so a stop signal never waits behind a running job
+  // (head-of-line blocking when prefetch is saturated). The queue is
+  // declared by privileged services; the scoped worker user only reads it.
+  // cancelJob is idempotent — double delivery with the inline handler below
+  // is harmless.
+  const cancelQueue = `${queue}.cancel`;
+  const cancelConsumerTag = await consumeCancelShared(ctx.channel, cancelQueue, (jobId) => {
+    logger.info({ jobId }, "Received job cancellation on priority lane");
+    handleCancelSignal(jobId);
+  });
 
   const heartbeatInterval = setInterval(() => {
     const { availableCpu, availableMemoryMb } = resourceMonitor.getAvailable();
@@ -278,6 +321,7 @@ async function main(): Promise<void> {
       onSignal: () => {
         workerPool.startDrain();
         cancelConsumer(ctx.channel, consumerTag);
+        cancelConsumer(ctx.channel, cancelConsumerTag);
         clearInterval(heartbeatInterval);
       },
       drainWaiter: () => workerPool.hasActiveJobs(),
