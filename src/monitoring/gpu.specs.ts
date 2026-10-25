@@ -1,118 +1,177 @@
-import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { logger } from "../utils/logger.js";
+import { discoverLinuxGpus } from "./gpu.linux.js";
+import { discoverNvidiaGpus, parseNvidiaSmiOutput } from "./gpu.nvidia.js";
+import {
+  normalizePciAddress,
+  type GpuDiscoveryResult,
+  type GpuDiscoverySource,
+  type GpuSpec,
+} from "./gpu.types.js";
 
-/**
- * A single physical GPU detected on the worker host.
- * `memoryMb` is the GPU's dedicated VRAM in MiB.
- */
-export interface GpuSpec {
-  index: number;
-  vendor: string;
-  name: string;
-  memoryMb: number;
-  driverVersion?: string;
-  computeCapability?: string;
-}
+export type {
+  GpuDiscoveryDiagnostics,
+  GpuDiscoveryResult,
+  GpuDiscoverySource,
+  GpuSpec,
+  UnclassifiedGpuDevice,
+} from "./gpu.types.js";
+export {
+  allGpuMetadataComplete,
+  isGpuMetadataComplete,
+  missingGpuMetadata,
+  normalizePciAddress,
+  normalizePciId,
+  totalKnownGpuMemoryMb,
+} from "./gpu.types.js";
+export { parseNvidiaSmiOutput };
 
-/** Device nodes that indicate a GPU is present on the host. */
+/** Device nodes that indicate a GPU is present on the host (diagnostics only). */
 const GPU_DEVICE_PATHS = [
   "/dev/nvidia0",
   "/dev/nvidiactl",
-  "/dev/dri/renderD128",
+  "/dev/dri",
 ];
 
-const NVIDIA_SMI_ARGS = [
-  "--query-gpu=index,name,memory.total,driver_version,compute_cap",
-  "--format=csv,noheader,nounits",
-];
+export interface GpuMergeResult {
+  gpus: GpuSpec[];
+  /** Number of sysfs entries that enriched an existing nvidia-smi entry. */
+  mergedCount: number;
+}
 
-// Older nvidia-smi builds do not understand compute_cap. Retry without it.
-const NVIDIA_SMI_FALLBACK_ARGS = [
-  "--query-gpu=index,name,memory.total,driver_version",
-  "--format=csv,noheader,nounits",
-];
-
-function runNvidiaSmi(args: string[]): string {
-  return execFileSync("nvidia-smi", args, {
-    encoding: "utf8",
-    timeout: 5_000,
-    stdio: ["ignore", "pipe", "ignore"],
-  }).trim();
+function fillMissing(target: GpuSpec, candidate: GpuSpec): void {
+  if (!target.name && candidate.name) target.name = candidate.name;
+  if (target.memoryMb === undefined && candidate.memoryMb !== undefined) {
+    target.memoryMb = candidate.memoryMb;
+  }
+  if (!target.driverVersion && candidate.driverVersion) {
+    target.driverVersion = candidate.driverVersion;
+  }
+  if (!target.vendor && candidate.vendor) target.vendor = candidate.vendor;
+  if (!target.pciVendorId && candidate.pciVendorId) {
+    target.pciVendorId = candidate.pciVendorId;
+  }
+  if (!target.pciDeviceId && candidate.pciDeviceId) {
+    target.pciDeviceId = candidate.pciDeviceId;
+  }
+  if (!target.pciAddress && candidate.pciAddress) {
+    target.pciAddress = candidate.pciAddress;
+  }
+  if (!target.id) {
+    target.id =
+      candidate.id ??
+      (target.pciAddress ? `pci:${target.pciAddress}` : undefined);
+  }
 }
 
 /**
- * Parse `nvidia-smi --query-gpu=... --format=csv,noheader,nounits` output.
- * Columns: index, name, memory.total (MiB), driver_version[, compute_cap].
- * Unparseable lines are skipped so one bad row does not hide the other GPUs.
+ * Merge NVIDIA-tooling results with generic Linux discovery.
+ *
+ * nvidia-smi is authoritative for the properties it reports, while sysfs can
+ * fill in a PCI identity or a missing value. Entries are deduplicated by PCI
+ * address. For very old nvidia-smi versions that cannot report a PCI address,
+ * a best-effort vendor+VRAM match prevents the sysfs pass from duplicating the
+ * same hardware.
  */
-export function parseNvidiaSmiOutput(output: string): GpuSpec[] {
-  const gpus: GpuSpec[] = [];
+export function mergeGpuLists(
+  nvidiaGpus: GpuSpec[],
+  linuxGpus: GpuSpec[],
+): GpuMergeResult {
+  const merged = nvidiaGpus.map((gpu) => ({ ...gpu }));
+  const byAddress = new Map<string, GpuSpec>();
 
-  for (const rawLine of output.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line) continue;
+  for (const gpu of merged) {
+    const address = normalizePciAddress(gpu.pciAddress);
+    if (!address) continue;
+    gpu.pciAddress = address;
+    byAddress.set(address, gpu);
+  }
 
-    const [indexRaw, nameRaw, memoryRaw, driverRaw, computeRaw] = line
-      .split(",")
-      .map((part) => part.trim());
+  const appended: GpuSpec[] = [];
+  let mergedCount = 0;
 
-    const index = Number.parseInt(indexRaw ?? "", 10);
-    const memoryMb = Number.parseInt(memoryRaw ?? "", 10);
+  for (const candidate of linuxGpus) {
+    const address = normalizePciAddress(candidate.pciAddress);
+    let target = address ? byAddress.get(address) : undefined;
 
-    if (!Number.isInteger(index) || !nameRaw || !Number.isFinite(memoryMb)) {
-      logger.debug({ line }, "Skipping unparseable nvidia-smi GPU row");
+    if (!target && candidate.vendor === "NVIDIA") {
+      target = merged.find(
+        (gpu) =>
+          !gpu.pciAddress &&
+          gpu.vendor === candidate.vendor &&
+          (gpu.memoryMb === undefined ||
+            candidate.memoryMb === undefined ||
+            gpu.memoryMb === candidate.memoryMb),
+      );
+    }
+
+    if (target) {
+      fillMissing(target, candidate);
+      if (address) {
+        target.pciAddress = address;
+        byAddress.set(address, target);
+      }
+      mergedCount += 1;
       continue;
     }
 
-    gpus.push({
-      index,
-      vendor: "NVIDIA",
-      name: nameRaw,
-      memoryMb,
-      ...(driverRaw && driverRaw !== "N/A"
-        ? { driverVersion: driverRaw }
-        : {}),
-      ...(computeRaw && computeRaw !== "N/A"
-        ? { computeCapability: computeRaw }
-        : {}),
+    appended.push({
+      ...candidate,
+      ...(address ? { pciAddress: address } : {}),
     });
   }
 
-  return gpus;
+  let nextIndex =
+    merged.length > 0 ? Math.max(...merged.map((gpu) => gpu.index)) + 1 : 0;
+  for (const gpu of appended) {
+    gpu.index = nextIndex++;
+  }
+
+  return {
+    gpus: [...merged, ...appended].sort((a, b) => a.index - b.index),
+    mergedCount,
+  };
 }
 
 /**
- * Scan the host for usable GPUs.
+ * Run every discovery adapter and normalize the result.
  *
- * NVIDIA is detected through `nvidia-smi`, which gives us the name, VRAM and
- * driver/CUDA metadata needed for advertising the node. A machine without
- * `nvidia-smi` (or without a GPU) is treated as CPU-only — we deliberately do
- * not advertise a GPU we cannot run containers on.
+ * Failure of one adapter never prevents the other from reporting hardware.
+ * Execution readiness is intentionally not probed here; a discovered GPU is
+ * not necessarily a GPU that a workload can execute on.
+ */
+export function discoverGpus(): GpuDiscoveryResult {
+  const nvidia = discoverNvidiaGpus();
+  const linux = discoverLinuxGpus();
+  const merged = mergeGpuLists(nvidia.gpus, linux.gpus);
+
+  const sources = new Set<GpuDiscoverySource>(
+    merged.gpus.map((gpu) => gpu.discoverySource),
+  );
+  if (merged.mergedCount > 0) sources.add("linux-sysfs");
+
+  return {
+    gpus: merged.gpus,
+    diagnostics: {
+      nvidiaSmiSucceeded: nvidia.succeeded,
+      ...(nvidia.error ? { nvidiaSmiError: nvidia.error } : {}),
+      linuxSysfsSucceeded: linux.succeeded,
+      ...(linux.error ? { linuxSysfsError: linux.error } : {}),
+      deviceNodesPresent: hasGpuDeviceNodes(),
+      sources: [...sources],
+      unclassifiedDevices: linux.unclassifiedDevices,
+    },
+  };
+}
+
+/**
+ * Backward-compatible wrapper for callers that only need the GPU list.
+ * Prefer `discoverGpus()` when diagnostics are useful.
  */
 export function detectGpuSpecs(): GpuSpec[] {
-  try {
-    return parseNvidiaSmiOutput(runNvidiaSmi(NVIDIA_SMI_ARGS));
-  } catch (err) {
-    logger.debug(
-      { err },
-      "nvidia-smi query with compute capability failed; retrying without it"
-    );
-  }
-
-  try {
-    return parseNvidiaSmiOutput(runNvidiaSmi(NVIDIA_SMI_FALLBACK_ARGS));
-  } catch (err) {
-    logger.debug({ err }, "nvidia-smi GPU detection unavailable");
-    return [];
-  }
+  return discoverGpus().gpus;
 }
 
-/**
- * True when GPU device nodes exist even if no supported detection tool is
- * installed. Used only for diagnostics so a misconfigured host is visible in
- * the logs instead of silently registering as CPU-only.
- */
+/** True when GPU/DRM device nodes are visible (diagnostics only). */
 export function hasGpuDeviceNodes(): boolean {
   return GPU_DEVICE_PATHS.some((devicePath) => existsSync(devicePath));
 }

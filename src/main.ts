@@ -1,7 +1,13 @@
 import { loadConfig } from "./config/config.js";
 import { getMachineId } from "./security/identity.js";
 import { detectSystemSpecs } from "./monitoring/system.specs.js";
-import { detectGpuSpecs, hasGpuDeviceNodes } from "./monitoring/gpu.specs.js";
+import {
+  allGpuMetadataComplete,
+  discoverGpus,
+  missingGpuMetadata,
+  totalKnownGpuMemoryMb,
+  type GpuDiscoveryResult,
+} from "./monitoring/gpu.specs.js";
 import { computeAllocatable } from "./monitoring/capacity.js";
 import { ResourceMonitor } from "./monitoring/resource.monitor.js";
 import { createConnection, closeConnection } from "./messaging/rabbit.connection.js";
@@ -18,32 +24,109 @@ import { registerNodeWithRetry, sendHeartbeat } from "./bootstrap/scheduler.clie
 import { loadBootstrapState, saveBootstrapState } from "./bootstrap/bootstrap.state.js";
 import { getAgentVersion } from "./utils/version.js";
 
+function logGpuDiscovery(result: GpuDiscoveryResult): void {
+  const { gpus, diagnostics } = result;
+
+  if (gpus.length === 0) {
+    if (diagnostics.nvidiaSmiError) {
+      logger.debug(
+        { reason: diagnostics.nvidiaSmiError },
+        "NVIDIA GPU tooling unavailable"
+      );
+    }
+    if (diagnostics.linuxSysfsError) {
+      logger.debug(
+        { reason: diagnostics.linuxSysfsError },
+        "Linux sysfs GPU discovery unavailable"
+      );
+    }
+
+    if (diagnostics.unclassifiedDevices.length > 0) {
+      logger.warn(
+        { devices: diagnostics.unclassifiedDevices },
+        "GPU device nodes present, but hardware identity could not be established; registering node as CPU-only"
+      );
+    } else if (diagnostics.deviceNodesPresent) {
+      logger.warn(
+        "GPU device nodes present, but no supported GPU hardware was identified; registering node as CPU-only"
+      );
+    } else {
+      logger.info("No supported GPU hardware detected; registering node as CPU-only");
+    }
+    return;
+  }
+
+  const metadataComplete = allGpuMetadataComplete(gpus);
+  const incompleteGpus = gpus
+    .map((gpu) => ({
+      index: gpu.index,
+      id: gpu.id,
+      vendor: gpu.vendor,
+      missing: missingGpuMetadata(gpu),
+    }))
+    .filter((gpu) => gpu.missing.length > 0);
+
+  logger.info(
+    {
+      gpuCount: gpus.length,
+      sources: diagnostics.sources,
+      gpuName: gpus.find((gpu) => gpu.name)?.name ?? null,
+      gpuMemoryMb: totalKnownGpuMemoryMb(gpus) ?? null,
+      gpuMetadataComplete: metadataComplete,
+      gpuExecutionReady: false,
+      gpus: gpus.map((gpu) => ({
+        index: gpu.index,
+        id: gpu.id,
+        vendor: gpu.vendor,
+        name: gpu.name,
+        memoryMb: gpu.memoryMb,
+        pciAddress: gpu.pciAddress,
+        discoverySource: gpu.discoverySource,
+      })),
+    },
+    "GPU hardware detected"
+  );
+
+  if (!metadataComplete) {
+    logger.info(
+      { incompleteGpus },
+      "GPU hardware detected, but some metadata is unknown"
+    );
+  }
+
+  if (
+    !diagnostics.nvidiaSmiSucceeded &&
+    diagnostics.nvidiaSmiError &&
+    diagnostics.sources.includes("linux-sysfs")
+  ) {
+    logger.info(
+      { reason: diagnostics.nvidiaSmiError, source: "linux-sysfs" },
+      "NVIDIA tooling unavailable; GPU hardware detected through Linux sysfs"
+    );
+  }
+
+  if (diagnostics.unclassifiedDevices.length > 0) {
+    logger.debug(
+      { devices: diagnostics.unclassifiedDevices },
+      "Display devices present that were not classified as supported GPUs"
+    );
+  }
+
+  logger.info(
+    { gpuExecutionReady: false },
+    "GPU hardware detected, but workload execution readiness has not been verified"
+  );
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
   const machineId = getMachineId();
   logger.info({ machineId }, "Worker starting");
 
   const specs = detectSystemSpecs();
-  const gpus = detectGpuSpecs();
-  const gpuMemoryMb = gpus.reduce((total, gpu) => total + gpu.memoryMb, 0);
-
-  if (gpus.length > 0) {
-    logger.info(
-      {
-        gpuCount: gpus.length,
-        gpuName: gpus[0]?.name,
-        gpuMemoryMb,
-        gpus,
-      },
-      "GPU detected; registering node as GPU-capable"
-    );
-  } else if (hasGpuDeviceNodes()) {
-    logger.warn(
-      "GPU device nodes found, but no supported GPU tooling (nvidia-smi) is available; registering node as CPU-only"
-    );
-  } else {
-    logger.info("No GPU detected; registering node as CPU-only");
-  }
+  const gpuDiscovery = discoverGpus();
+  const gpus = gpuDiscovery.gpus;
+  logGpuDiscovery(gpuDiscovery);
 
   const { allocatableCpu, allocatableMemoryMb } = computeAllocatable(
     specs,

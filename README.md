@@ -34,13 +34,35 @@ If the env does not pass validation, the worker fails fast with a clear error.
 - `computeAllocatable()` clamps these by `CPU_LIMIT` and `MEMORY_LIMIT_MB` if set.
   - Result: **`allocatableCpu`**, **`allocatableMemoryMb`**.
 - `ResourceMonitor` keeps track of **used vs allocatable** CPU & memory across jobs.
-- `detectGpuSpecs()` queries `nvidia-smi` for every GPU's index, name, VRAM,
-  driver version and compute capability. The result is logged at startup:
-  - GPUs found → `GPU detected; registering node as GPU-capable`.
-  - GPU device nodes present but no usable tooling → warning and CPU-only registration.
-  - No GPU → `No GPU detected; registering node as CPU-only`.
-- A node is only advertised as GPU-capable when the GPU can actually run
-  containers (i.e. `nvidia-smi` is available).
+- `discoverGpus()` runs a layered discovery pipeline (`src/monitoring/gpu.*.ts`):
+  1. **NVIDIA adapter** (`gpu.nvidia.ts`) queries `nvidia-smi` for index, name,
+     VRAM, driver version and — when the driver supports it — compute
+     capability, UUID and PCI bus ID. Missing executables, timeouts, nonzero
+     exits and malformed rows are non-fatal and fall through to generic Linux
+     discovery.
+  2. **Linux sysfs adapter** (`gpu.linux.ts`) inspects
+     `/sys/class/drm/cardN` and `/sys/bus/pci/devices`. It recognizes NVIDIA
+     (`0x10de`), AMD (`0x1002`) and Intel (`0x8086`), resolves DRM nodes to
+     their underlying PCI devices, and deduplicates multiple nodes for the same
+     physical GPU by resolved device path and PCI address. It does **not**
+     require `lspci`, ROCm, CUDA or NVML.
+     - AMD VRAM is read from `mem_info_vram_total`; Intel discrete VRAM from
+       `lmem_total_bytes`. These are reported only when present and non-zero.
+     - NVIDIA model/driver details may come from the kernel `proc`/`sys`
+       interfaces when `nvidia-smi` is unavailable.
+     - Unknown model, VRAM or driver values stay **unknown**; they are never
+       replaced with zero or fabricated values.
+- Results from both adapters are merged: NVIDIA data wins for properties it
+  reports, while sysfs fills gaps and adds non-NVIDIA devices.
+  - `gpuAvailable` means **GPU hardware detected** — it is not proof that a
+    workload can execute.
+  - `gpuMetadataComplete` means model, VRAM and driver are known for every GPU.
+  - `gpuExecutionReady` remains `false` until an execution backend is verified;
+    discovery alone never advertises CUDA/VA-API/Quick Sync readiness.
+  - Aggregate `gpuMemoryMb` is only reported when **every** GPU's VRAM is known.
+- Startup logs distinguish NVIDIA discovery, sysfs fallback, detected hardware
+  with incomplete metadata, unclassified display devices, and CPU-only
+  registration.
 
 ### 1.4 Scheduler registration (`src/bootstrap/scheduler.client.ts`, `src/bootstrap/bootstrap.state.ts`)
 
@@ -464,8 +486,11 @@ Published via `publishNodeEvent(event, payload)` with routing key `node.<nodeId>
 At `HEARTBEAT_INTERVAL_MS` the worker:
 
 - Reads current `availableCpu` / `availableMemoryMb` from `ResourceMonitor`.
-- Posts `NodeHeartbeatRequest` to Scheduler with these values, plus the detected
+- Posts `NodeHeartbeatRequest` to Scheduler with these values, plus the current
   GPU list so a node's GPU metadata stays correct across restarts/upgrades.
+  - The Scheduler replaces stored GPU metadata from each heartbeat.
+  - An explicitly empty GPU list clears stale GPU metadata.
+  - Workers that omit the GPU field leave stored metadata untouched.
 - Logs warnings on failures but keeps running.
 
 This allows the Scheduler to make better placement decisions and detect unhealthy nodes.
