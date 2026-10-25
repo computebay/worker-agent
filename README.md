@@ -26,7 +26,7 @@ If the env does not pass validation, the worker fails fast with a clear error.
 - On subsequent starts, it loads the same identity.
 - **`getMachineId()`** returns this stable UUID and is used when registering with the Scheduler.
 
-### 1.3 System capacity (`src/monitoring/system.specs.ts`, `src/monitoring/capacity.ts`)
+### 1.3 System capacity & GPU discovery (`src/monitoring/`)
 
 - `detectSystemSpecs()` reads:
   - `totalCpu` = `os.cpus().length`.
@@ -34,13 +34,21 @@ If the env does not pass validation, the worker fails fast with a clear error.
 - `computeAllocatable()` clamps these by `CPU_LIMIT` and `MEMORY_LIMIT_MB` if set.
   - Result: **`allocatableCpu`**, **`allocatableMemoryMb`**.
 - `ResourceMonitor` keeps track of **used vs allocatable** CPU & memory across jobs.
+- `detectGpuSpecs()` queries `nvidia-smi` for every GPU's index, name, VRAM,
+  driver version and compute capability. The result is logged at startup:
+  - GPUs found → `GPU detected; registering node as GPU-capable`.
+  - GPU device nodes present but no usable tooling → warning and CPU-only registration.
+  - No GPU → `No GPU detected; registering node as CPU-only`.
+- A node is only advertised as GPU-capable when the GPU can actually run
+  containers (i.e. `nvidia-smi` is available).
 
 ### 1.4 Scheduler registration (`src/bootstrap/scheduler.client.ts`, `src/bootstrap/bootstrap.state.ts`)
 
 - On startup, `src/main.ts` either:
   - **Loads bootstrap state** from `~/.computebay/bootstrap.json` (nodeId, RabbitMQ URL, queue, publish exchange), or
   - **Calls** `POST /nodes/register` with:
-    - `machineId` (stable UUID), physical CPU/RAM, `agentVersion`.
+    - `machineId` (stable UUID), physical CPU/RAM, `agentVersion`,
+    - `gpus`: detected GPU list (empty for CPU-only nodes).
 - Registration returns:
   - `nodeId` (session/node ID for this registration),
   - `rabbitmq.url`,
@@ -456,7 +464,8 @@ Published via `publishNodeEvent(event, payload)` with routing key `node.<nodeId>
 At `HEARTBEAT_INTERVAL_MS` the worker:
 
 - Reads current `availableCpu` / `availableMemoryMb` from `ResourceMonitor`.
-- Posts `NodeHeartbeatRequest` to Scheduler with these values.
+- Posts `NodeHeartbeatRequest` to Scheduler with these values, plus the detected
+  GPU list so a node's GPU metadata stays correct across restarts/upgrades.
 - Logs warnings on failures but keeps running.
 
 This allows the Scheduler to make better placement decisions and detect unhealthy nodes.

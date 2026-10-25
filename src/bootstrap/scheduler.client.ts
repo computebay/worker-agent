@@ -1,10 +1,13 @@
 import { logger } from "../utils/logger.js";
+import type { GpuSpec } from "../monitoring/gpu.specs.js";
 
 export type NodeRegisterRequest = {
   machineId: string;
   cpuCores: number;
   memoryMB: number;
   agentVersion: string;
+  /** GPUs detected at startup. Empty array means a CPU-only node. */
+  gpus: GpuSpec[];
 }
 
 export type NodeRegisterResponse = {
@@ -20,6 +23,8 @@ export type NodeHeartbeatRequest = {
   nodeId: string;
   availableCpu: number;
   availableMemoryMB: number;
+  /** Re-reported so GPU state stays correct across worker restarts/upgrades. */
+  gpus?: GpuSpec[];
 }
 
 function joinUrl(base: string, path: string): string {

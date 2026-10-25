@@ -1,6 +1,7 @@
 import { loadConfig } from "./config/config.js";
 import { getMachineId } from "./security/identity.js";
 import { detectSystemSpecs } from "./monitoring/system.specs.js";
+import { detectGpuSpecs, hasGpuDeviceNodes } from "./monitoring/gpu.specs.js";
 import { computeAllocatable } from "./monitoring/capacity.js";
 import { ResourceMonitor } from "./monitoring/resource.monitor.js";
 import { createConnection, closeConnection } from "./messaging/rabbit.connection.js";
@@ -23,6 +24,27 @@ async function main(): Promise<void> {
   logger.info({ machineId }, "Worker starting");
 
   const specs = detectSystemSpecs();
+  const gpus = detectGpuSpecs();
+  const gpuMemoryMb = gpus.reduce((total, gpu) => total + gpu.memoryMb, 0);
+
+  if (gpus.length > 0) {
+    logger.info(
+      {
+        gpuCount: gpus.length,
+        gpuName: gpus[0]?.name,
+        gpuMemoryMb,
+        gpus,
+      },
+      "GPU detected; registering node as GPU-capable"
+    );
+  } else if (hasGpuDeviceNodes()) {
+    logger.warn(
+      "GPU device nodes found, but no supported GPU tooling (nvidia-smi) is available; registering node as CPU-only"
+    );
+  } else {
+    logger.info("No GPU detected; registering node as CPU-only");
+  }
+
   const { allocatableCpu, allocatableMemoryMb } = computeAllocatable(
     specs,
     config.CPU_LIMIT,
@@ -82,6 +104,7 @@ async function main(): Promise<void> {
       cpuCores: specs.totalCpu,
       memoryMB: specs.totalMemoryMb,
       agentVersion,
+      gpus,
     });
 
     nodeId = reg.nodeId;
@@ -306,6 +329,7 @@ async function main(): Promise<void> {
       nodeId,
       availableCpu,
       availableMemoryMB: availableMemoryMb,
+      gpus,
     }).catch((err) => {
       logger.warn({ err, nodeId }, "Heartbeat failed");
     });
@@ -352,6 +376,7 @@ async function main(): Promise<void> {
             nodeId,
             availableCpu,
             availableMemoryMB: availableMemoryMb,
+            gpus,
           }).catch((err) => {
             logger.warn({ err, nodeId }, "Final heartbeat failed");
           });
