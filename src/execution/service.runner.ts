@@ -12,6 +12,7 @@ import {
   inspectContainerRunning,
   waitContainer,
   streamContainerLogs,
+  type ContainerGpuConfig,
 } from "./container.runtime.js";
 import { portManager, isPortFree, waitForPort } from "../network/port.manager.js";
 import { gitClone } from "../libs/git.clone.js";
@@ -28,6 +29,8 @@ export interface ServiceStartResult {
 
 export interface RunServiceOptions {
   onLogChunk?: (chunk: string) => void;
+  /** Validated GPU exposure for the service container. */
+  gpu?: ContainerGpuConfig;
 }
 
 export async function runService(
@@ -149,6 +152,7 @@ export async function runService(
       mounts,
       portBindings: [{ hostPort, containerPort: job.servicePort }],
       runAsUser,
+      gpu: options?.gpu,
     });
 
     if (options?.onLogChunk) {

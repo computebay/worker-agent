@@ -1,9 +1,24 @@
 import { spawn } from "node:child_process";
 import { logger } from "../utils/logger.js";
+import {
+  GpuExecutionError,
+  type GpuExecutionErrorCode,
+} from "../monitoring/gpu.requirement.js";
 
 export interface ContainerMount {
   hostPath: string;
   containerPath: string;
+}
+
+/**
+ * Vendor-neutral GPU request handed to the Docker wrapper. Only the NVIDIA
+ * implementation exists in this phase; unsupported vendors fail closed.
+ */
+export interface ContainerGpuConfig {
+  vendor: string;
+  backend: string;
+  /** Current local host indices. Never an enumeration index from another host. */
+  deviceIndices: number[];
 }
 
 export interface ContainerCreateOptions {
@@ -25,6 +40,161 @@ export interface ContainerCreateOptions {
   capAdd?: string[];
   /** Port bindings for service containers: { hostPort, containerPort }[]. */
   portBindings?: Array<{ hostPort: number; containerPort: number }>;
+  /** Optional GPU exposure. Omitted for CPU-only jobs. */
+  gpu?: ContainerGpuConfig;
+}
+
+/**
+ * Build the vendor-specific Docker device-selection arguments.
+ *
+ * NVIDIA uses Docker's supported `--gpus device=<indices>` syntax. The value is
+ * emitted as one argv element; it is never assembled through a shell and never
+ * uses `all`.
+ */
+export function buildContainerGpuArgs(
+  gpu: ContainerGpuConfig | undefined
+): string[] {
+  if (!gpu) return [];
+
+  if (gpu.vendor.trim().toLowerCase() !== "nvidia") {
+    throw new GpuExecutionError(
+      "DOCKER_GPU_UNSUPPORTED",
+      `GPU vendor '${gpu.vendor}' is not supported for Docker execution`
+    );
+  }
+  const backend = gpu.backend.trim().toLowerCase();
+  if (backend !== "cuda" && backend !== "nvenc") {
+    throw new GpuExecutionError(
+      "DOCKER_GPU_UNSUPPORTED",
+      `GPU backend '${gpu.backend}' is not supported for Docker execution`
+    );
+  }
+
+  const indices = gpu.deviceIndices;
+  if (
+    !Array.isArray(indices) ||
+    indices.length === 0 ||
+    indices.some(
+      (index) => !Number.isInteger(index) || index < 0
+    ) ||
+    new Set(indices).size !== indices.length
+  ) {
+    throw new GpuExecutionError(
+      "GPU_ASSIGNMENT_INVALID",
+      "GPU device assignment is empty, duplicated, or contains invalid indices"
+    );
+  }
+
+  return ["--gpus", `device=${indices.join(",")}`];
+}
+
+export interface DockerErrorClassification {
+  code: GpuExecutionErrorCode;
+  message: string;
+}
+
+/** Map Docker/NVIDIA stderr to a sanitized, actionable GPU failure. */
+export function classifyDockerGpuError(stderr: string): DockerErrorClassification {
+  const text = stderr.toLowerCase();
+
+  if (
+    text.includes("unknown flag: --gpus") ||
+    text.includes("unknown shorthand flag") ||
+    text.includes("flag provided but not defined") ||
+    text.includes("--gpus: unknown")
+  ) {
+    return {
+      code: "DOCKER_GPU_UNSUPPORTED",
+      message: "Docker on this host does not support the --gpus option",
+    };
+  }
+
+  if (
+    text.includes("could not select device driver") ||
+    text.includes("nvidia-container-cli: initialization error") ||
+    text.includes("nvidia-container-runtime") ||
+    text.includes("failed to initialize nvml") ||
+    text.includes("no nvidia devices") ||
+    text.includes("nvidia-container-toolkit")
+  ) {
+    return {
+      code: "DOCKER_GPU_RUNTIME_UNAVAILABLE",
+      message:
+        "NVIDIA Container Toolkit/runtime is missing or misconfigured on this host",
+    };
+  }
+
+  if (
+    text.includes("permission denied") ||
+    text.includes("operation not permitted") ||
+    text.includes("failed to open /dev/nvidia") ||
+    text.includes("cannot open /dev/nvidia")
+  ) {
+    return {
+      code: "DOCKER_GPU_DEVICE_ACCESS",
+      message: "Docker cannot access the assigned NVIDIA device",
+    };
+  }
+
+  if (
+    text.includes("no such device") ||
+    text.includes("device not found") ||
+    text.includes("invalid device") ||
+    text.includes("unknown device")
+  ) {
+    return {
+      code: "GPU_DEVICE_NOT_FOUND",
+      message: "The assigned GPU device is no longer available to Docker",
+    };
+  }
+
+  return {
+    code: "DOCKER_GPU_START_FAILED",
+    message: "GPU container failed to start",
+  };
+}
+
+function secretValues(env: Record<string, string>): string[] {
+  return Object.values(env).filter(
+    (value) => typeof value === "string" && value.length > 0
+  );
+}
+
+function sanitizeText(text: string, secrets: string[]): string {
+  let safe = text;
+  for (const secret of secrets) {
+    if (secret.length >= 3) {
+      safe = safe.split(secret).join("***");
+    }
+  }
+  return safe.slice(0, 4000);
+}
+
+/** Redact `-e KEY=value` pairs and any env values that leak into log text. */
+export function redactDockerArgs(
+  args: string[],
+  env: Record<string, string> = {}
+): string[] {
+  const secrets = secretValues(env);
+  const redacted: string[] = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "-e" && i + 1 < args.length) {
+      redacted.push(arg);
+      const assignment = args[++i]!;
+      const separator = assignment.indexOf("=");
+      redacted.push(
+        separator >= 0
+          ? `${assignment.slice(0, separator)}=***`
+          : "***"
+      );
+      continue;
+    }
+    redacted.push(sanitizeText(arg, secrets));
+  }
+
+  return redacted;
 }
 
 export interface ContainerResult {
@@ -51,7 +221,12 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     runAsUser,
     capAdd = [],
     portBindings = [],
+    gpu,
   } = options;
+
+  // Validate the vendor/backend before spawning. A GPU job must never fall
+  // back to CPU execution if its device configuration is unusable.
+  const gpuArgs = buildContainerGpuArgs(gpu);
 
   // Service containers (those with port bindings) run user code that typically
   // needs to write to its working directory (e.g. npm install -> node_modules/).
@@ -76,6 +251,7 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     "-d",
     "--name",
     containerId,
+    ...gpuArgs,
     "--cpus",
     String(cpu),
     "--memory",
@@ -105,8 +281,12 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
     image,
     ...command,
   ];
-  const cmd = `docker ${args.join(" ")}`;
-  logger.info({ containerId, image, cmd }, "Spawning Docker container");
+  const secrets = secretValues(env);
+  const loggableArgs = redactDockerArgs(args, env);
+  logger.info(
+    { containerId, image, args: loggableArgs, gpu: gpu ? { vendor: gpu.vendor, backend: gpu.backend, deviceIndices: gpu.deviceIndices } : undefined },
+    "Spawning Docker container"
+  );
 
   return new Promise((resolve, reject) => {
     const proc = spawn("docker", args, {
@@ -123,14 +303,47 @@ export function createAndStart(options: ContainerCreateOptions): Promise<void> {
         logger.info({ containerId }, "Docker container spawned successfully");
         resolve();
       } else {
-        logger.error({ containerId, code, signal, stderr }, "Docker run failed");
-        reject(new Error(`docker run failed: exit ${code}, signal ${signal}, stderr: ${stderr}`));
+        const safeStderr = sanitizeText(stderr, secrets);
+        logger.error(
+          { containerId, code, signal, stderr: safeStderr, gpu: Boolean(gpu) },
+          "Docker run failed"
+        );
+        if (gpu) {
+          const classified = classifyDockerGpuError(stderr);
+          const detail = safeStderr.trim();
+          reject(
+            new GpuExecutionError(
+              classified.code,
+              detail
+                ? `${classified.message}: ${detail}`
+                : classified.message
+            )
+          );
+        } else {
+          reject(
+            new Error(
+              `docker run failed: exit ${code}, signal ${signal}, stderr: ${safeStderr}`
+            )
+          );
+        }
       }
     });
 
     proc.on("error", (err) => {
-      logger.error({ containerId, err }, "Docker spawn error");
-      reject(err);
+      logger.error(
+        { containerId, err: { code: (err as NodeJS.ErrnoException).code, message: err.message } },
+        "Docker spawn error"
+      );
+      if (gpu) {
+        reject(
+          new GpuExecutionError(
+            "DOCKER_GPU_RUNTIME_UNAVAILABLE",
+            "Docker is not available on this worker"
+          )
+        );
+      } else {
+        reject(err);
+      }
     });
   });
 }

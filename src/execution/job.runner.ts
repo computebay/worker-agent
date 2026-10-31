@@ -12,6 +12,7 @@ import {
   removeContainer,
   waitContainer,
   streamContainerLogs,
+  type ContainerGpuConfig,
   type ContainerMount,
 } from "./container.runtime.js";
 import { gitClone } from "../libs/git.clone.js";
@@ -47,6 +48,8 @@ export interface RunJobOptions {
   abortSignal?: AbortSignal;
   /** Root directory for per-job scratch dirs (default: os.tmpdir()). */
   jobWorkDir?: string;
+  /** Validated GPU exposure for this job. Omitted for CPU-only jobs. */
+  gpu?: ContainerGpuConfig;
 }
 
 export async function runJob(
@@ -152,6 +155,7 @@ async function runGitBatchJob(
         mounts,
         networkEnabled: batchJob.networkEnabled,
         runAsUser,
+        gpu: options.gpu,
       });
     } catch (err) {
       logger.error({ err, jobId: batchJob.jobId }, "Failed to create container");
@@ -367,6 +371,7 @@ async function runBatchImageJob(
           PGID: String(currentGid),
         },
         capAdd: ["SETUID", "SETGID", "SETFCAP"],
+        gpu: options.gpu,
       });
     } catch (err) {
       logger.error({ err, jobId: job.jobId }, "Failed to create batch-image container");

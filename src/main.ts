@@ -10,6 +10,12 @@ import {
 } from "./monitoring/gpu.specs.js";
 import { computeAllocatable } from "./monitoring/capacity.js";
 import { ResourceMonitor } from "./monitoring/resource.monitor.js";
+import {
+  applyGpuExecutionReadiness,
+  describeGpuReadiness,
+  probeGpuExecution,
+  type GpuExecutionReadiness,
+} from "./monitoring/gpu.runtime.js";
 import { createConnection, closeConnection } from "./messaging/rabbit.connection.js";
 import { consume, cancelConsumer, consumeCancelShared } from "./messaging/rabbit.consumer.js";
 import { publish } from "./messaging/rabbit.publisher.js";
@@ -24,7 +30,10 @@ import { registerNodeWithRetry, sendHeartbeat } from "./bootstrap/scheduler.clie
 import { loadBootstrapState, saveBootstrapState } from "./bootstrap/bootstrap.state.js";
 import { getAgentVersion } from "./utils/version.js";
 
-function logGpuDiscovery(result: GpuDiscoveryResult): void {
+function logGpuDiscovery(
+  result: GpuDiscoveryResult,
+  readiness: GpuExecutionReadiness
+): void {
   const { gpus, diagnostics } = result;
 
   if (gpus.length === 0) {
@@ -73,7 +82,8 @@ function logGpuDiscovery(result: GpuDiscoveryResult): void {
       gpuName: gpus.find((gpu) => gpu.name)?.name ?? null,
       gpuMemoryMb: totalKnownGpuMemoryMb(gpus) ?? null,
       gpuMetadataComplete: metadataComplete,
-      gpuExecutionReady: false,
+      gpuExecutionReady: readiness.ready,
+      executionBackends: readiness.backends,
       gpus: gpus.map((gpu) => ({
         index: gpu.index,
         id: gpu.id,
@@ -82,6 +92,7 @@ function logGpuDiscovery(result: GpuDiscoveryResult): void {
         memoryMb: gpu.memoryMb,
         pciAddress: gpu.pciAddress,
         discoverySource: gpu.discoverySource,
+        executionBackends: gpu.executionBackends,
       })),
     },
     "GPU hardware detected"
@@ -111,11 +122,6 @@ function logGpuDiscovery(result: GpuDiscoveryResult): void {
       "Display devices present that were not classified as supported GPUs"
     );
   }
-
-  logger.info(
-    { gpuExecutionReady: false },
-    "GPU hardware detected, but workload execution readiness has not been verified"
-  );
 }
 
 async function main(): Promise<void> {
@@ -125,8 +131,20 @@ async function main(): Promise<void> {
 
   const specs = detectSystemSpecs();
   const gpuDiscovery = discoverGpus();
-  const gpus = gpuDiscovery.gpus;
-  logGpuDiscovery(gpuDiscovery);
+  const gpuReadiness = await probeGpuExecution(gpuDiscovery.gpus);
+  const gpus = applyGpuExecutionReadiness(
+    gpuDiscovery.gpus,
+    gpuReadiness
+  );
+  logGpuDiscovery(gpuDiscovery, gpuReadiness);
+  logger.info(
+    {
+      gpuExecutionReady: gpuReadiness.ready,
+      backends: gpuReadiness.backends,
+      diagnostics: gpuReadiness.diagnostics,
+    },
+    describeGpuReadiness(gpuReadiness)
+  );
 
   const { allocatableCpu, allocatableMemoryMb } = computeAllocatable(
     specs,
@@ -236,6 +254,7 @@ async function main(): Promise<void> {
     jobTimeoutMs: config.JOB_TIMEOUT_MS,
     logUploadConfig,
     jobWorkDir: config.JOB_WORK_DIR,
+    gpus,
     onLogChunk: (jobId, chunk) => {
       publishNodeEvent("job.log.chunk", { jobId, ...stampLogChunk(chunk) });
     },

@@ -57,9 +57,26 @@ If the env does not pass validation, the worker fails fast with a clear error.
   - `gpuAvailable` means **GPU hardware detected** — it is not proof that a
     workload can execute.
   - `gpuMetadataComplete` means model, VRAM and driver are known for every GPU.
-  - `gpuExecutionReady` remains `false` until an execution backend is verified;
-    discovery alone never advertises CUDA/VA-API/Quick Sync readiness.
+  - `gpuExecutionReady` becomes `true` only after the **execution readiness
+    probe** below verifies a usable NVIDIA Docker backend; discovery alone
+    never advertises readiness.
   - Aggregate `gpuMemoryMb` is only reported when **every** GPU's VRAM is known.
+- **Execution readiness probe** (`src/monitoring/gpu.runtime.ts`): after
+  discovery, the worker runs lightweight, non-mutating checks and stores the
+  verified backend list (`executionBackends`, e.g. `["cuda","nvenc"]`) on each
+  NVIDIA device before registration/heartbeat:
+  1. NVIDIA hardware + a known host driver version,
+  2. Docker daemon reachable (`docker version`),
+  3. `docker run --help` advertises `--gpus`,
+  4. NVIDIA Container Toolkit present (`nvidia` Docker runtime in
+     `docker info`, or `nvidia-container-cli` / `nvidia-container-runtime`),
+  5. `/dev/nvidiactl` and `/dev/nvidia0` device nodes visible.
+  - Any failed check leaves the device with an **empty** backend list and the
+    worker still starts and serves CPU-only jobs. Diagnostics distinguish
+    missing hardware, missing driver info, missing Docker, missing `--gpus`
+    support, missing toolkit and invisible device nodes.
+  - Non-NVIDIA devices always advertise an empty backend list; AMD/Intel
+    execution backends are not implemented yet.
 - Startup logs distinguish NVIDIA discovery, sysfs fallback, detected hardware
   with incomplete metadata, unclassified display devices, and CPU-only
   registration.
@@ -95,8 +112,36 @@ If the env does not pass validation, the worker fails fast with a clear error.
   - `maxConcurrency` (min of config and allocatable CPU),
   - `jobTimeoutMs`,
   - `logUploadConfig` (MinIO client config),
+  - `gpus`: the local GPU inventory **with verified `executionBackends`**,
   - `onLogChunk(jobId, chunk)` → publishes `job.log.chunk` events,
   - `onJobResult(...)` → publishes final `job.completed` / `job.failed` / `job.timeout` events.
+
+### 1.7 GPU job execution (`src/monitoring/gpu.requirement.ts`, `src/execution/`)
+
+- `toScheduledJob` normalizes `resources.gpu` (legacy `"any"`/`"none"` and the
+  canonical object form) into a requirement and shape-checks the scheduler's
+  `gpuAssignment` from `job.scheduled`.
+- Before every GPU job, the worker:
+  1. Resolves the assignment against its **current local inventory** — stable
+     ids (`id:`) or PCI addresses (`pci:`) win; a scheduler-reported index is
+     only used when no stable identity exists.
+  2. Rejects (as a normal `job.failed`, never a CPU fallback) missing
+     assignments, vendor/backend mismatches, devices missing locally, devices
+     without the verified backend, unknown/insufficient VRAM, and duplicated
+     physical devices.
+  3. Reserves whole devices in a local exclusivity set (`WorkerPool`) and
+     passes `{ vendor, backend, deviceIndices }` to the Docker wrapper.
+- Docker receives **only** the assigned devices: `--gpus device=0,1` (one
+  argv element, never `all`, never `--privileged`, never a `/dev` mount).
+  Indices sent to Docker are the worker's **current local** indices, never the
+  ones recorded at scheduling time.
+- GPU reservations are released when the job reaches a terminal state; service
+  jobs hold their GPUs until `stopService()` releases them through the
+  service registry.
+- Docker GPU failures are classified (`classifyDockerGpuError`) into actionable
+  errors: missing `--gpus` support, missing/misconfigured NVIDIA toolkit,
+  device access problems, disappeared devices, or generic start failures.
+  `-e KEY=value` arguments and any leaked secret values are redacted from logs.
 
 At this point the worker is registered, connected to RabbitMQ, and ready to consume jobs.
 

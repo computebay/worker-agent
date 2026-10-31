@@ -29,6 +29,12 @@ export interface GpuSpec {
    */
   pciAddress?: string;
   discoverySource: GpuDiscoverySource;
+  /**
+   * Docker execution backends verified for this device, e.g. `["cuda",
+   * "nvenc"]`. Absent or empty when discovery found hardware but the worker
+   * could not verify that Docker can expose it. Discovery alone never sets it.
+   */
+  executionBackends?: string[];
 }
 
 /** A display device that could not be tied to a supported GPU vendor. */

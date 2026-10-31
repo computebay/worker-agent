@@ -1,3 +1,12 @@
+import {
+  parseGpuAssignment,
+  parseGpuRequirement,
+  type GpuAssignment,
+  type GpuRequirement,
+} from "../monitoring/gpu.requirement.js";
+
+export type { GpuAssignment, GpuRequirement } from "../monitoring/gpu.requirement.js";
+
 /**
  * Thrown when the message payload is invalid.
  * Consumer should nack without requeue to avoid an infinite loop.
@@ -30,7 +39,8 @@ export interface OutputSpec {
 export interface BatchImageResources {
   cpu: number;
   memoryMb: number;
-  gpu: "any" | "none";
+  /** Legacy `"any" | "none"` values are normalized to this shape. */
+  gpu?: GpuRequirement;
 }
 
 export interface BatchImageJob extends ScheduledJobBase {
@@ -40,9 +50,6 @@ export interface BatchImageJob extends ScheduledJobBase {
   /** Optional — jobs that generate output from scratch set no input. */
   input?: InputSpec;
   output: OutputSpec;
-  cpu: number;
-  memoryMB: number;
-  gpu: "any" | "none";
 }
 
 /**
@@ -113,6 +120,8 @@ export interface ScheduledJobMessage {
   input?: InputSpec;
   /** Output specification for batch-image jobs. */
   output?: OutputSpec;
+  /** Scheduler-selected GPU devices for GPU-required jobs. */
+  gpuAssignment?: unknown;
 }
 
 /**
@@ -128,6 +137,10 @@ interface ScheduledJobBase {
   env?: Record<string, string>;
   networkEnabled: boolean;
   hasArtifacts: boolean;
+  /** Canonical GPU requirement, or null for CPU-only execution. */
+  gpu: GpuRequirement | null;
+  /** Scheduler assignment, validated against local inventory before execution. */
+  gpuAssignment?: GpuAssignment;
 }
 
 export interface ScheduledBatchJob extends ScheduledJobBase {
@@ -174,6 +187,25 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
       msg
     );
   }
+
+  const { requirement: gpu, error: gpuError } = parseGpuRequirement(
+    msg.resources.gpu
+  );
+  if (gpuError) {
+    throw new InvalidJobPayloadError(gpuError, msg);
+  }
+
+  const { assignment: parsedAssignment, error: assignmentError } =
+    parseGpuAssignment(msg.gpuAssignment);
+  if (assignmentError) {
+    throw new InvalidJobPayloadError(assignmentError, msg);
+  }
+
+  // A GPU job must never silently fall back to CPU. A missing assignment is
+  // allowed through this structural parser so the worker can report a normal
+  // job failure (instead of nacking the message forever).
+  const gpuAssignment =
+    gpu && parsedAssignment ? parsedAssignment : undefined;
 
   // --- batch-image ---
   if (rawType === "batch-image") {
@@ -235,14 +267,6 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
         msg
       );
     }
-    const gpu = msg.resources?.gpu;
-    if (gpu !== "any" && gpu !== "none") {
-      throw new InvalidJobPayloadError(
-        "resources.gpu must be 'any' or 'none' for batch-image jobs",
-        msg
-      );
-    }
-
     return {
       jobId: msg.jobId,
       type: "batch-image",
@@ -255,6 +279,7 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
       cpu,
       memoryMB,
       gpu,
+      gpuAssignment,
       networkEnabled: false,
       hasArtifacts: false,
     };
@@ -280,6 +305,8 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
       startCommand: msg.startCommand,
       cpu,
       memoryMB,
+      gpu,
+      gpuAssignment,
       networkEnabled: true,
       hasArtifacts: msg.hasArtifacts === true,
       servicePort: msg.servicePort,
@@ -303,6 +330,8 @@ export function toScheduledJob(msg: ScheduledJobMessage): ScheduledJob {
     startCommand: msg.startCommand,
     cpu,
     memoryMB,
+    gpu,
+    gpuAssignment,
     repoUrl: msg.repoUrl,
     branch: msg.branch ?? "main",
     networkEnabled: msg.networkEnabled !== false,

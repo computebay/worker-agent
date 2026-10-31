@@ -14,7 +14,11 @@ export interface ServiceEntry {
   workDirPath?: string;
 }
 
-type ReleaseCallback = (cpu: number, memoryMB: number) => void;
+type ReleaseCallback = (
+  serviceId: string,
+  cpu: number,
+  memoryMB: number
+) => void;
 type ResourceEntry = { cpu: number; memoryMB: number };
 
 class ServiceRegistry {
@@ -84,7 +88,7 @@ class ServiceRegistry {
 
     const resource = this.resources.get(serviceId);
     if (resource && this.releaseCallback) {
-      this.releaseCallback(resource.cpu, resource.memoryMB);
+      this.releaseCallback(serviceId, resource.cpu, resource.memoryMB);
     }
     this.resources.delete(serviceId);
 
